@@ -1,0 +1,363 @@
+# Cube Guess Backend
+
+Microservico de autenticacao reutilizavel construido com FastAPI. Projetado para ser plugado em qualquer projeto que precise de auth robusto, com sessoes opacas via cookie HTTP-only, CSRF, rate limiting por endpoint, soft delete e validacoes rigorosas seguindo recomendacoes OWASP e NIST.
+
+## Stack
+
+| Componente | Tecnologia |
+|---|---|
+| Framework | FastAPI + Uvicorn |
+| Banco | PostgreSQL 17 + SQLAlchemy 2 (async) |
+| Cache / Sessoes | Redis 7 |
+| Object Storage | MinIO |
+| Migrations | Alembic |
+| Hashing | Argon2id (argon2-cffi) |
+| Deps | Poetry |
+| Container | Docker Compose |
+
+## Quickstart
+
+```bash
+# 1. Clone
+git clone https://github.com/EduardoSA8006/cube-guess-backend.git
+cd cube-guess-backend
+
+# 2. Copie e configure o .env
+cp .env.example .env
+# Edite SECRET_KEY com um valor seguro:
+#   openssl rand -hex 64
+
+# 3. Suba tudo
+docker compose up --build
+
+# 4. Rode as migrations
+docker compose exec api alembic upgrade head
+
+# 5. Acesse
+# API: http://127.0.0.1:8000/health
+# Docs (apenas em DEBUG): http://127.0.0.1:8000/docs
+# MinIO Console: http://127.0.0.1:9001
+```
+
+## Desenvolvimento local (sem Docker)
+
+```bash
+# Requer Python >=3.12 e Poetry instalado
+poetry install
+
+# Copie o .env e ajuste POSTGRES_HOST, REDIS_HOST para localhost
+cp .env.example .env
+
+# Rode
+poetry run uvicorn app.main:app --reload
+```
+
+## Arquitetura
+
+```
+app/
+├── core/                          # Infraestrutura — nenhuma feature importa de volta
+│   ├── config.py                  #   Settings (Pydantic) + validacao de producao
+│   ├── database.py                #   SQLAlchemy async engine + Base
+│   ├── redis.py                   #   Conexao Redis
+│   ├── security.py                #   Token opaco, CSRF HMAC, sessoes, cookies
+│   ├── middleware.py              #   Rate limit, headers, size limit, session, CSRF
+│   ├── exceptions.py              #   Hierarquia base de erros
+│   └── error_handlers.py          #   Handlers globais registrados no app
+├── shared/                        # Codigo reutilizado entre features
+│   └── dependencies.py            #   get_current_session
+├── features/                      # Feature-first — cada feature isolada
+│   └── auth/
+│       ├── models.py              #   User (SQLAlchemy)
+│       ├── schemas.py             #   Request/Response (Pydantic)
+│       ├── validators.py          #   Nome, email, senha, data de nascimento
+│       ├── service.py             #   Logica de negocio
+│       ├── router.py              #   Endpoints
+│       ├── exceptions.py          #   Erros especificos da feature
+│       └── rate_limit.py          #   Rate limit por endpoint
+└── migrations/
+    └── versions/
+```
+
+**Regra de dependencia:** `features/` -> `shared/` -> `core/` (nunca o contrario).
+
+## Endpoints
+
+### Auth (`/auth`)
+
+| Metodo | Rota | Auth | Rate Limit | Descricao |
+|---|---|---|---|---|
+| POST | `/auth/register` | Nao | IP 5/min, Email 3/min | Criar conta |
+| POST | `/auth/login` | Nao | IP 10/min, Email 5/5min | Login (set cookies) |
+| POST | `/auth/logout` | Sim | IP 10/min | Logout (revoga token) |
+| POST | `/auth/logout-all` | Sim | IP 10/min | Revoga todas as sessoes |
+| POST | `/auth/verify-email` | Nao | IP 10/min | Verificar email |
+| GET | `/auth/me` | Sim | -- | Dados do usuario |
+| POST | `/auth/delete-account` | Sim | IP 3/min | Soft delete (7 dias) |
+
+### Outros
+
+| Metodo | Rota | Descricao |
+|---|---|---|
+| GET | `/health` | Health check |
+
+## Modelo de Autenticacao
+
+### Sessao opaca + CSRF
+
+A autenticacao usa tokens opacos de 48 caracteres armazenados no Redis, nunca expostos ao JavaScript.
+
+```
+Browser                           Backend                         Redis
+  │                                  │                               │
+  │── POST /auth/login ──────────>   │                               │
+  │                                  │── create_session() ────────>  │
+  │                                  │<── token ──────────────────   │
+  │<── Set-Cookie: session (httponly, strict) ──│                     │
+  │<── Set-Cookie: csrf_token (lax, JS-readable)│                    │
+  │                                  │                               │
+  │── POST /auth/... ────────────>   │                               │
+  │   Cookie: session=<token>        │── get_session(token) ──────>  │
+  │   X-CSRF-Token: <hmac>           │── verify_csrf(token, hmac)    │
+```
+
+- **Session cookie**: `HttpOnly`, `Secure` (prod), `SameSite=Strict`
+- **CSRF cookie**: `SameSite=Lax`, legivel por JS — frontend envia via header `X-CSRF-Token`
+- **CSRF token**: `HMAC-SHA256(SECRET_KEY, session_token)` — vinculado criptograficamente a sessao
+
+### Lifecycle do token
+
+| Evento | Comportamento |
+|---|---|
+| **Expiracao absoluta** | Sessao morre apos `SESSION_TTL` (default 7 dias) |
+| **Expiracao idle** | Sessao morre apos `SESSION_IDLE_TTL` (default 24h) de inatividade |
+| **Rotacao** | Novo token gerado a cada `TOKEN_ROTATION_INTERVAL` (default 1h) |
+| **Grace period** | Token antigo funciona por `TOKEN_ROTATION_GRACE` (default 60s), read-only |
+| **Logout** | Token revogado instantaneamente no Redis |
+| **Logout all** | Todas as sessoes do usuario deletadas atomicamente (Lua script) |
+
+### User-Agent binding
+
+Sessoes sao vinculadas ao User-Agent do navegador. Mudanca de UA invalida a sessao imediatamente.
+
+## Seguranca
+
+### Middleware stack (ordem de execucao)
+
+```
+Request → TrustedHost → SecurityHeaders → RateLimit → CORS → SizeLimit → Session → CSRF → Route
+```
+
+| Middleware | Funcao |
+|---|---|
+| **TrustedHost** | Rejeita requests com `Host` fora de `ALLOWED_HOSTS` |
+| **SecurityHeaders** | `X-Content-Type-Options`, `X-Frame-Options`, `CSP`, `HSTS`, etc. |
+| **RateLimit** | 100 req/min por IP via Redis (fail-open se Redis cair) |
+| **CORS** | Restrito a `ALLOWED_ORIGINS`, credentials habilitado |
+| **SizeLimit** | Rejeita body >10MB (raw ASGI, verifica bytes reais, nao so Content-Length) |
+| **Session** | Valida/rotaciona sessao, atualiza last_active, binding de UA |
+| **CSRF** | Signed double-submit cookie para metodos nao-seguros |
+
+### Headers de seguranca
+
+```
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+Content-Security-Policy: default-src 'none'; frame-ancestors 'none'
+Cache-Control: no-store
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload  (quando HTTPS)
+```
+
+### Validacoes e anti-enumeracao (OWASP)
+
+**Nome**
+- 2-120 caracteres, minimo 2 palavras
+- Aceita: letras Unicode, espacos, hifen, apostrofo, ponto
+- Bloqueia: caracteres de controle, invisíveis, null bytes
+- Formatacao automatica: `JOÃO DA SILVA` → `João da Silva`, `D'ÁVILA` → `D'Ávila`
+
+**Email**
+- Validado via `email-validator` (nao regex caseira)
+- Normalizado para lowercase inteiro
+- Preserva `+alias` e pontos
+- Anti-enumeracao: mesma resposta neutra em register/login independente do email existir
+
+**Senha (NIST SP 800-63B)**
+- Minimo 8 caracteres, 1 maiuscula, 1 numero, 1 especial
+- Blocklist de 100+ senhas comuns (password, 123456, qwerty, senha, admin, etc.)
+- Deteccao de sequencias (abcd, 1234, aaaa)
+- Deteccao contextual (partes do nome, email ou nome do sistema)
+- Hash: **Argon2id** com rehash automatico em login se parametros mudarem
+
+**Anti-enumeracao**
+- Register: sempre retorna mensagem neutra, timing constante (Argon2 hash sempre computado)
+- Login (email errado): roda Argon2 verify contra dummy hash → timing identico
+- Login (senha errada): mesma mensagem generica
+- Login (nao verificado): revela status apenas apos credenciais corretas
+
+### Tratamento de erros
+
+```
+AppError (500)
+├── BadRequestError (400)
+│   └── InvalidVerificationTokenError
+├── UnauthorizedError (401)
+│   ├── InvalidCredentialsError
+│   └── SessionExpiredError
+├── ForbiddenError (403)
+│   └── EmailNotVerifiedError
+├── NotFoundError (404)
+├── ConflictError (409)
+├── RateLimitedError (429)
+```
+
+Formato padronizado de erro:
+
+```json
+{
+  "error": {
+    "code": "INVALID_CREDENTIALS",
+    "message": "Credenciais invalidas"
+  }
+}
+```
+
+Erros 500 em producao nunca expõem stack traces ou detalhes internos.
+
+### Validacao de startup
+
+Em modo producao (`DEBUG=false`), o servidor **recusa iniciar** se:
+- `SECRET_KEY` ainda tem o valor placeholder
+- `COOKIE_SECURE` esta `false`
+- `ALLOWED_HOSTS` contem `localhost`
+- `MINIO_SECURE` esta `false`
+
+Docs (Swagger/ReDoc/OpenAPI) ficam **desabilitados** fora do modo DEBUG.
+
+## Soft delete
+
+Quando um usuario deleta a conta:
+
+1. `deleted_at` recebe timestamp atual
+2. Todas as sessoes sao revogadas instantaneamente
+3. Login fica bloqueado
+4. Apos 7 dias: hard delete automatico via background task (Redis lock para nao duplicar entre workers)
+
+## Variaveis de ambiente
+
+```bash
+# Projeto
+PROJECT_NAME=Cube Guess Backend
+DEBUG=true                    # false em producao
+
+# PostgreSQL
+POSTGRES_USER=cube
+POSTGRES_PASSWORD=cube
+POSTGRES_DB=cube_guess
+POSTGRES_HOST=postgres
+POSTGRES_PORT=5432
+DB_ECHO=false                 # true para logar queries SQL
+
+# Redis
+REDIS_HOST=redis
+REDIS_PORT=6379
+REDIS_PASSWORD=redis
+
+# MinIO
+MINIO_ENDPOINT=minio:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_SECURE=false            # true em producao
+
+# Seguranca
+SECRET_KEY=<obrigatorio>      # openssl rand -hex 64
+ALLOWED_ORIGINS=["http://localhost:3000"]
+ALLOWED_HOSTS=["localhost","127.0.0.1"]
+TRUSTED_PROXY_IPS=["127.0.0.1","::1"]
+
+# Rate Limiting
+RATE_LIMIT_REQUESTS=100       # por IP, por minuto
+RATE_LIMIT_WINDOW=60
+
+# Sessao
+SESSION_TTL=604800            # 7 dias
+SESSION_IDLE_TTL=86400        # 24 horas
+TOKEN_ROTATION_INTERVAL=3600  # 1 hora
+TOKEN_ROTATION_GRACE=60       # segundos
+COOKIE_SECURE=false           # true em producao
+```
+
+## Deploy em producao
+
+```bash
+# 1. Gere um SECRET_KEY seguro
+openssl rand -hex 64
+
+# 2. Configure o .env de producao
+DEBUG=false
+SECRET_KEY=<valor_gerado>
+COOKIE_SECURE=true
+MINIO_SECURE=true
+ALLOWED_HOSTS=["seu-dominio.com"]
+ALLOWED_ORIGINS=["https://seu-dominio.com"]
+POSTGRES_PASSWORD=<senha_forte>
+REDIS_PASSWORD=<senha_forte>
+MINIO_ACCESS_KEY=<usuario_forte>
+MINIO_SECRET_KEY=<senha_forte>
+
+# 3. Suba com o compose de producao
+docker compose -f docker-compose.prod.yml up -d --build
+
+# 4. Rode migrations
+docker compose -f docker-compose.prod.yml exec api alembic upgrade head
+```
+
+Todos os servicos ficam em `127.0.0.1` — nada exposto para a rede. O frontend na mesma VPS acessa o backend via localhost. Apenas o frontend (nginx) deve ter porta aberta.
+
+## Integracacao com frontend
+
+O frontend precisa:
+
+1. **Login**: `POST /auth/login` com `{email, password}`. Os cookies sao setados automaticamente pelo browser.
+
+2. **Requests autenticados**: Ler o cookie `csrf_token` (nao e HTTP-only) e enviar em cada request nao-GET:
+   ```javascript
+   const csrfToken = document.cookie
+     .split('; ')
+     .find(row => row.startsWith('csrf_token='))
+     ?.split('=')[1];
+
+   fetch('/auth/me', {
+     credentials: 'include',
+     headers: { 'X-CSRF-Token': csrfToken },
+   });
+   ```
+
+3. **Logout**: `POST /auth/logout` — cookies sao limpos na resposta.
+
+## Adicionando novas features
+
+Crie uma pasta em `app/features/<nome>/` com:
+
+```
+app/features/game/
+├── __init__.py
+├── models.py        # SQLAlchemy models
+├── schemas.py       # Pydantic request/response
+├── service.py       # Logica de negocio
+├── router.py        # Endpoints
+├── exceptions.py    # Erros especificos (herdam de core/exceptions.py)
+└── rate_limit.py    # Rate limits especificos (se necessario)
+```
+
+Registre o router em `app/main.py`:
+```python
+from app.features.game.router import router as game_router
+app.include_router(game_router)
+```
+
+## Licenca
+
+MIT

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+
+# mypy / ruff
+.mypy_cache/
+.ruff_cache/
+
+# Docker volumes
+postgres_data/
+redis_data/
+minio_data/
