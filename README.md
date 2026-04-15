@@ -373,4 +373,13 @@ poetry run mypy app/
 
 ## Licenca
 
-MIT
+Licenciado sob qualquer uma das licencas abaixo, a sua escolha:
+
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE) ou <http://www.apache.org/licenses/LICENSE-2.0>)
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT) ou <https://opensource.org/licenses/MIT>)
+
+A Apache-2.0 inclui concessao explicita de patentes; a MIT e mais simples e curta. Voce pode usar o codigo sob os termos da que preferir.
+
+### Contribuicoes
+
+Salvo declaracao explicita em contrario, qualquer contribuicao intencionalmente submetida para inclusao neste projeto por voce, conforme definido na Apache-2.0, sera dual-licenciada como acima, sem quaisquer termos ou condicoes adicionais.

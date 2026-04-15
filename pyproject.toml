@@ -2,6 +2,8 @@
 name = "authentication-service"
 version = "0.1.0"
 description = "Reusable authentication microservice"
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE"]
 authors = [
     {name = "EduardoSA8006"}
 ]
