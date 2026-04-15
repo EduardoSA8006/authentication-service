@@ -2,14 +2,14 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    PROJECT_NAME: str = "Cube Guess Backend"
+    PROJECT_NAME: str = "Authentication Service"
     ENVIRONMENT: str = "development"  # "development" | "production"
     DEBUG: bool = False
 
     # PostgreSQL
-    POSTGRES_USER: str = "cube"
-    POSTGRES_PASSWORD: str = "cube"
-    POSTGRES_DB: str = "cube_guess"
+    POSTGRES_USER: str = "auth"
+    POSTGRES_PASSWORD: str = "auth"
+    POSTGRES_DB: str = "auth_service"
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
     DB_ECHO: bool = False

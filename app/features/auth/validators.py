@@ -127,7 +127,7 @@ def _is_contextual(password: str, context: list[str]) -> bool:
         for part in ctx.lower().split():
             if len(part) >= 3 and part in lower:
                 return True
-    for word in ("cube", "guess", "cubeguess"):
+    for word in ("auth", "authentication"):
         if word in lower:
             return True
     return False

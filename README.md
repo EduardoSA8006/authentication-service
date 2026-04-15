@@ -1,6 +1,8 @@
-# Cube Guess Backend
+# Authentication Service
 
 Microservico de autenticacao reutilizavel construido com FastAPI. Projetado para ser plugado em qualquer projeto que precise de auth robusto, com sessoes opacas via cookie HTTP-only, CSRF, rate limiting por endpoint, soft delete e validacoes rigorosas seguindo recomendacoes OWASP e NIST.
+
+> Projeto open-source extraido de um produto real. Sinta-se a vontade para clonar, adaptar e usar em qualquer projeto seu.
 
 ## Stack
 
@@ -19,8 +21,8 @@ Microservico de autenticacao reutilizavel construido com FastAPI. Projetado para
 
 ```bash
 # 1. Clone
-git clone https://github.com/EduardoSA8006/cube-guess-backend.git
-cd cube-guess-backend
+git clone https://github.com/EduardoSA8006/authentication-service.git
+cd authentication-service
 
 # 2. Copie e configure o .env
 cp .env.example .env
@@ -249,13 +251,13 @@ Quando um usuario deleta a conta:
 
 ```bash
 # Projeto
-PROJECT_NAME=Cube Guess Backend
+PROJECT_NAME=Authentication Service
 DEBUG=true                    # false em producao
 
 # PostgreSQL
-POSTGRES_USER=cube
-POSTGRES_PASSWORD=cube
-POSTGRES_DB=cube_guess
+POSTGRES_USER=auth
+POSTGRES_PASSWORD=auth
+POSTGRES_DB=auth_service
 POSTGRES_HOST=postgres
 POSTGRES_PORT=5432
 DB_ECHO=false                 # true para logar queries SQL
@@ -316,7 +318,7 @@ docker compose -f docker-compose.prod.yml exec api alembic upgrade head
 
 Todos os servicos ficam em `127.0.0.1` — nada exposto para a rede. O frontend na mesma VPS acessa o backend via localhost. Apenas o frontend (nginx) deve ter porta aberta.
 
-## Integracacao com frontend
+## Integracao com frontend
 
 O frontend precisa:
 
@@ -342,7 +344,7 @@ O frontend precisa:
 Crie uma pasta em `app/features/<nome>/` com:
 
 ```
-app/features/game/
+app/features/<nome>/
 ├── __init__.py
 ├── models.py        # SQLAlchemy models
 ├── schemas.py       # Pydantic request/response
@@ -354,8 +356,19 @@ app/features/game/
 
 Registre o router em `app/main.py`:
 ```python
-from app.features.game.router import router as game_router
-app.include_router(game_router)
+from app.features.<nome>.router import router as <nome>_router
+app.include_router(<nome>_router)
+```
+
+## Contribuindo
+
+Pull requests sao bem-vindos. Para mudancas grandes, abra uma issue primeiro para discutirmos o que voce gostaria de mudar.
+
+Antes de enviar um PR:
+
+```bash
+poetry run ruff check .
+poetry run mypy app/
 ```
 
 ## Licenca

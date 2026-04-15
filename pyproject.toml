@@ -1,7 +1,7 @@
 [project]
-name = "cube-guess-backend"
+name = "authentication-service"
 version = "0.1.0"
-description = "Cube Guess Backend API"
+description = "Reusable authentication microservice"
 authors = [
     {name = "EduardoSA8006"}
 ]

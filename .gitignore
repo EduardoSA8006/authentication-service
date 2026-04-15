@@ -1,25 +1,80 @@
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
+*.egg
 dist/
 build/
+.eggs/
+.pytest_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
 
 # Virtual environments
 .venv/
+venv/
+env/
+ENV/
 
-# Environment
+# Environment / secrets
 .env
+.env.*
+!.env.example
+*.env
+secrets/
+secrets.*
+credentials.json
+credentials.yaml
+credentials.yml
 
-# IDE
+# Keys & certificates
+*.pem
+*.key
+*.crt
+*.cer
+*.cert
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.pub
+id_ed25519
+id_ed25519.pub
+
+# IDE / editor
 .vscode/
 .idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
 
-# mypy / ruff
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs
+*.log
+logs/
+
+# mypy / ruff / type checkers
 .mypy_cache/
 .ruff_cache/
+.pytype/
+.pyre/
 
-# Docker volumes
+# Docker volumes (local)
 postgres_data/
 redis_data/
 minio_data/
+
+# Local overrides
+docker-compose.override.yml
+docker-compose.local.yml
