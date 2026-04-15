@@ -85,10 +85,15 @@ async def register_user(
         date_of_birth=date_of_birth,
     )
     db.add(user)
-    await db.commit()
-    await db.refresh(user)
+    await db.flush()
 
-    token = await _create_verification_token(str(user.id), user.email)
+    try:
+        token = await _create_verification_token(str(user.id), user.email)
+    except Exception:
+        await db.rollback()
+        raise
+
+    await db.commit()
     return token
 
 

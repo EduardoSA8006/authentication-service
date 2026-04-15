@@ -74,3 +74,13 @@ class RateLimitedError(AppError):
     status_code = 429
     code = "RATE_LIMITED"
     message = "Too many requests"
+
+
+# ---------------------------------------------------------------------------
+# 5xx
+# ---------------------------------------------------------------------------
+
+class ServiceUnavailableError(AppError):
+    status_code = 503
+    code = "SERVICE_UNAVAILABLE"
+    message = "Service temporarily unavailable"

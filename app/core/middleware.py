@@ -1,5 +1,6 @@
 import logging
 import time
+from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -76,7 +77,12 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                     headers={"Retry-After": str(retry_after)},
                 )
         except Exception:
-            logger.warning("Rate limiter unavailable, allowing request through")
+            logger.warning("Rate limiter unavailable, rejecting request")
+            return _error_json(
+                "SERVICE_UNAVAILABLE",
+                "Service temporarily unavailable",
+                503,
+            )
 
         return await call_next(request)
 
@@ -201,15 +207,18 @@ class SessionMiddleware(BaseHTTPMiddleware):
             clear_session_cookies(response)
             return response
 
+        # Grace sessions: honour the short TTL, skip touch and rotation.
+        # The 60s TTL set during rotation must not be extended.
+        if session.get("grace"):
+            request.state.session = session
+            request.state.session_token = token
+            return await call_next(request)
+
         await touch_session(token, session)
         request.state.session = session
         request.state.session_token = token
 
         response = await call_next(request)
-
-        # Grace sessions are read-only — never re-rotate
-        if session.get("grace"):
-            return response
 
         if needs_rotation(session):
             try:
@@ -237,8 +246,22 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         origin = request.headers.get("origin")
-        if origin and origin not in settings.ALLOWED_ORIGINS:
-            return _error_json("ORIGIN_REJECTED", "Origin not allowed", 403)
+        referer = request.headers.get("referer")
+
+        if origin:
+            if origin not in settings.ALLOWED_ORIGINS:
+                return _error_json("ORIGIN_REJECTED", "Origin not allowed", 403)
+        elif referer:
+            parsed = urlparse(referer)
+            referer_origin = f"{parsed.scheme}://{parsed.netloc}"
+            if referer_origin not in settings.ALLOWED_ORIGINS:
+                return _error_json("ORIGIN_REJECTED", "Origin not allowed", 403)
+        else:
+            return _error_json(
+                "ORIGIN_MISSING",
+                "Origin or Referer header required",
+                403,
+            )
 
         csrf_token = request.headers.get(settings.CSRF_HEADER_NAME)
         if not csrf_token or not verify_csrf_token(session_token, csrf_token):

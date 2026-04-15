@@ -80,6 +80,11 @@ settings = Settings()
 
 _INSECURE_SECRET = "change-me-in-production-use-a-random-64-char-string"
 _MIN_SECRET_LENGTH = 32
+_MIN_SERVICE_PASSWORD_LENGTH = 12
+_INSECURE_DEFAULTS = frozenset({
+    "auth", "redis", "minioadmin", "password", "secret",
+    "admin", "root", "test", "123456", "postgres",
+})
 
 
 def validate_settings_for_production() -> list[str]:
@@ -106,6 +111,23 @@ def validate_settings_for_production() -> list[str]:
 
     if not settings.REDIS_PASSWORD:
         warnings.append("REDIS_PASSWORD is empty")
+    elif settings.REDIS_PASSWORD.lower() in _INSECURE_DEFAULTS:
+        warnings.append("REDIS_PASSWORD uses a known default value")
+
+    if settings.POSTGRES_PASSWORD.lower() in _INSECURE_DEFAULTS:
+        warnings.append("POSTGRES_PASSWORD uses a known default value")
+
+    if len(settings.POSTGRES_PASSWORD) < _MIN_SERVICE_PASSWORD_LENGTH:
+        warnings.append(
+            f"POSTGRES_PASSWORD is too short ({len(settings.POSTGRES_PASSWORD)} chars, "
+            f"minimum {_MIN_SERVICE_PASSWORD_LENGTH})"
+        )
+
+    if settings.MINIO_ACCESS_KEY.lower() in _INSECURE_DEFAULTS:
+        warnings.append("MINIO_ACCESS_KEY uses a known default value")
+
+    if settings.MINIO_SECRET_KEY.lower() in _INSECURE_DEFAULTS:
+        warnings.append("MINIO_SECRET_KEY uses a known default value")
 
     if "localhost" in settings.ALLOWED_HOSTS:
         warnings.append("ALLOWED_HOSTS contains 'localhost'")

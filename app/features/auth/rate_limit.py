@@ -1,6 +1,6 @@
 import logging
 
-from app.core.exceptions import RateLimitedError
+from app.core.exceptions import RateLimitedError, ServiceUnavailableError
 from app.core.redis import get_redis
 
 logger = logging.getLogger(__name__)
@@ -21,7 +21,8 @@ async def check_rate_limit(scope: str, key: str, limit: int, window: int) -> Non
     except RateLimitedError:
         raise
     except Exception:
-        logger.warning("Rate limit unavailable for %s, allowing request", scope)
+        logger.warning("Rate limit unavailable for %s, rejecting request", scope)
+        raise ServiceUnavailableError
 
 
 # Per-endpoint limits: (max_requests, window_seconds)
