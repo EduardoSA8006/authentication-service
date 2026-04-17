@@ -62,7 +62,8 @@ services:
   mailhog:
     image: mailhog/mailhog:v1.0.1
     ports:
-      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:1025:1025"   # SMTP (dev + tests em host)
+      - "127.0.0.1:8025:8025"   # UI
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "1025"]

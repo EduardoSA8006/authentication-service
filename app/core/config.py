@@ -33,12 +33,13 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "redis"
     REDIS_PORT: int = 6379
     REDIS_PASSWORD: str = ""
+    REDIS_DB: int = 0
 
     @property
     def redis_url(self) -> str:
         scheme = "rediss" if self.REDIS_TLS else "redis"
         cred = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
-        return f"{scheme}://{cred}{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+        return f"{scheme}://{cred}{self.REDIS_HOST}:{self.REDIS_PORT}/{self.REDIS_DB}"
 
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"

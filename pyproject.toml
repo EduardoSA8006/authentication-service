@@ -33,5 +33,48 @@ build-backend = "poetry.core.masonry.api"
 [dependency-groups]
 dev = [
     "ruff (>=0.15.10,<0.16.0)",
-    "mypy (>=1.20.1,<2.0.0)"
+    "mypy (>=1.20.1,<2.0.0)",
+    "pytest (>=8.3.5,<9.0.0)",
+    "pytest-asyncio (>=0.26.0,<1.0.0)",
+    "pytest-cov (>=6.1.0,<7.0.0)",
+    "httpx (>=0.28.0,<1.0.0)",
+    "dirty-equals (>=0.10.0,<1.0.0)"
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
+asyncio_default_test_loop_scope = "session"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=app",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+    "--cov-fail-under=85",
+]
+markers = [
+    "slow: tests that take >500ms",
+]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = [
+    "app/migrations/*",
+    "app/__init__.py",
+    "app/*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
 ]

@@ -360,6 +360,35 @@ from app.features.<nome>.router import router as <nome>_router
 app.include_router(<nome>_router)
 ```
 
+## Testes
+
+A suite roda contra serviços reais (Postgres + Redis + MailHog) com rollback transacional por teste e `FLUSHDB` para isolamento. Coverage mínima de 85% enforçada.
+
+```bash
+# 1. Subir serviços de suporte
+docker compose up -d postgres redis mailhog
+
+# 2. Criar banco de teste + migrations (idempotente)
+poetry run python tests/setup_db.py
+
+# 3. Rodar suite completa
+poetry run pytest
+
+# Rodar só um nível
+poetry run pytest tests/unit/          # ~1s
+poetry run pytest tests/integration/   # ~5s
+poetry run pytest tests/e2e/           # ~3s
+
+# Rodar teste específico
+poetry run pytest tests/unit/features/auth/test_validators.py::TestPassword -v
+
+# Coverage HTML local
+poetry run pytest --cov-report=html
+xdg-open htmlcov/index.html
+```
+
+CI em GitHub Actions (`.github/workflows/ci.yml`) roda a mesma suite em cada PR/push contra `main`, com serviços injetados via `services:` do workflow.
+
 ## Contribuindo
 
 Pull requests sao bem-vindos. Para mudancas grandes, abra uma issue primeiro para discutirmos o que voce gostaria de mudar.
@@ -369,6 +398,7 @@ Antes de enviar um PR:
 ```bash
 poetry run ruff check .
 poetry run mypy app/
+poetry run pytest
 ```
 
 ## Licenca
