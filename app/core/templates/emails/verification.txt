@@ -1,0 +1,9 @@
+Olá, {{ name }}
+
+Recebemos uma solicitação para criar uma conta com este email.
+Clique no link abaixo para confirmar:
+
+{{ link }}
+
+Este link expira em 24 horas. Se você não criou esta conta, ignore
+este email — nenhuma ação é necessária.

@@ -15,6 +15,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_started
+      mailhog:
+        condition: service_healthy
 
   postgres:
     image: postgres:17.4-alpine
@@ -56,6 +58,17 @@ services:
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
     volumes:
       - minio_data:/data
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    ports:
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "1025"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
 volumes:
   postgres_data:

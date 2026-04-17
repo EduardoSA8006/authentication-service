@@ -133,9 +133,15 @@ def _is_contextual(password: str, context: list[str]) -> bool:
     return False
 
 
+_PASSWORD_MAX = 128
+
+
 def validate_password(password: str, context: list[str] | None = None) -> None:
     if len(password) < 8:
         raise ValueError("Senha deve ter no mínimo 8 caracteres")
+
+    if len(password) > _PASSWORD_MAX:
+        raise ValueError(f"Senha deve ter no máximo {_PASSWORD_MAX} caracteres")
 
     if not any(c.isupper() for c in password):
         raise ValueError("Senha deve ter pelo menos uma letra maiúscula")

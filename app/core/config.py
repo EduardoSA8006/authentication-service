@@ -23,10 +23,11 @@ class Settings(BaseSettings):
 
     @property
     def database_url_sync(self) -> str:
-        return (
+        base = (
             f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
+        return f"{base}?sslmode=require" if self.POSTGRES_SSL else base
 
     # Redis
     REDIS_HOST: str = "redis"
@@ -35,8 +36,9 @@ class Settings(BaseSettings):
 
     @property
     def redis_url(self) -> str:
+        scheme = "rediss" if self.REDIS_TLS else "redis"
         cred = f":{self.REDIS_PASSWORD}@" if self.REDIS_PASSWORD else ""
-        return f"redis://{cred}{self.REDIS_HOST}:{self.REDIS_PORT}/0"
+        return f"{scheme}://{cred}{self.REDIS_HOST}:{self.REDIS_PORT}/0"
 
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"
@@ -49,6 +51,20 @@ class Settings(BaseSettings):
     ALLOWED_ORIGINS: list[str] = ["http://localhost:3000"]
     ALLOWED_HOSTS: list[str]  # Required — no default
     TRUSTED_PROXY_IPS: list[str] = ["127.0.0.1", "::1"]
+    POSTGRES_SSL: bool = False
+    REDIS_TLS: bool = False
+
+    # Email / SMTP
+    SMTP_HOST: str = "mailhog"
+    SMTP_PORT: int = 1025
+    SMTP_USER: str = ""
+    SMTP_PASSWORD: str = ""
+    SMTP_TLS: bool = False
+    SMTP_FROM: str = "Authentication Service <noreply@localhost>"
+    SMTP_TIMEOUT: int = 15  # segundos
+
+    # Frontend URL (obrigatório — sem default; Pydantic falha se ausente)
+    FRONTEND_URL: str
 
     # Rate limiting
     RATE_LIMIT_REQUESTS: int = 100
@@ -72,6 +88,18 @@ class Settings(BaseSettings):
     @property
     def is_production(self) -> bool:
         return self.ENVIRONMENT != "development"
+
+    @property
+    def session_cookie(self) -> str:
+        if self.COOKIE_SECURE and not self.COOKIE_DOMAIN and self.COOKIE_PATH == "/":
+            return f"__Host-{self.SESSION_COOKIE_NAME}"
+        return self.SESSION_COOKIE_NAME
+
+    @property
+    def csrf_cookie(self) -> str:
+        if self.COOKIE_SECURE and not self.COOKIE_DOMAIN and self.COOKIE_PATH == "/":
+            return f"__Host-{self.CSRF_COOKIE_NAME}"
+        return self.CSRF_COOKIE_NAME
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
@@ -128,6 +156,27 @@ def validate_settings_for_production() -> list[str]:
 
     if settings.MINIO_SECRET_KEY.lower() in _INSECURE_DEFAULTS:
         warnings.append("MINIO_SECRET_KEY uses a known default value")
+
+    if not settings.POSTGRES_SSL:
+        warnings.append("POSTGRES_SSL is False — database connection is unencrypted")
+
+    if not settings.REDIS_TLS:
+        warnings.append("REDIS_TLS is False — Redis connection is unencrypted")
+
+    if settings.FRONTEND_URL.startswith("http://"):
+        warnings.append("FRONTEND_URL uses http:// (not https://)")
+
+    if "localhost" in settings.FRONTEND_URL:
+        warnings.append("FRONTEND_URL contains 'localhost'")
+
+    if settings.SMTP_HOST in {"mailhog", "localhost"}:
+        warnings.append(f"SMTP_HOST is '{settings.SMTP_HOST}' — dev-only")
+
+    if not settings.SMTP_TLS:
+        warnings.append("SMTP_TLS is False — email sent in plaintext")
+
+    if not settings.SMTP_PASSWORD:
+        warnings.append("SMTP_PASSWORD is empty")
 
     if "localhost" in settings.ALLOWED_HOSTS:
         warnings.append("ALLOWED_HOSTS contains 'localhost'")

@@ -230,7 +230,7 @@ async def list_user_sessions(user_id: str) -> list[dict]:
 def set_session_cookies(response: Response, session_token: str) -> None:
     # Session cookie: strict SameSite, HTTP-only
     response.set_cookie(
-        key=settings.SESSION_COOKIE_NAME,
+        key=settings.session_cookie,
         value=session_token,
         httponly=True,
         secure=settings.COOKIE_SECURE,
@@ -241,7 +241,7 @@ def set_session_cookies(response: Response, session_token: str) -> None:
     )
     # CSRF cookie: lax SameSite, readable by JS
     response.set_cookie(
-        key=settings.CSRF_COOKIE_NAME,
+        key=settings.csrf_cookie,
         value=generate_csrf_token(session_token),
         httponly=False,
         secure=settings.COOKIE_SECURE,
@@ -254,7 +254,7 @@ def set_session_cookies(response: Response, session_token: str) -> None:
 
 def clear_session_cookies(response: Response) -> None:
     response.delete_cookie(
-        key=settings.SESSION_COOKIE_NAME,
+        key=settings.session_cookie,
         domain=settings.COOKIE_DOMAIN,
         path=settings.COOKIE_PATH,
         secure=settings.COOKIE_SECURE,
@@ -262,7 +262,7 @@ def clear_session_cookies(response: Response) -> None:
         httponly=True,
     )
     response.delete_cookie(
-        key=settings.CSRF_COOKIE_NAME,
+        key=settings.csrf_cookie,
         domain=settings.COOKIE_DOMAIN,
         path=settings.COOKIE_PATH,
         secure=settings.COOKIE_SECURE,

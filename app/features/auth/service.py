@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -10,6 +11,7 @@ from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.email import _hash_email, send_verification_email
 from app.core.redis import get_redis
 from app.core.security import (
     create_session,
@@ -22,6 +24,11 @@ from app.features.auth.exceptions import (
     InvalidVerificationTokenError,
 )
 from app.features.auth.models import User
+from app.features.auth.rate_limit import (
+    check_login_lockout,
+    clear_login_failures,
+    record_login_failure,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,14 +76,14 @@ async def register_user(
     date_of_birth: date,
     db: AsyncSession,
     request: Request,
-) -> str | None:
-    """Register a new user. Returns verification token or None (anti-enum)."""
+) -> None:
+    """Register a new user. Anti-enum: retorna silenciosamente se email existe."""
     # Always hash to keep constant timing regardless of email existence
     password_hash = _ph.hash(password)
 
     existing = await _get_user_by_email(email, db, include_deleted=True)
     if existing is not None:
-        return None
+        return
 
     user = User(
         name=name,
@@ -94,7 +101,9 @@ async def register_user(
         raise
 
     await db.commit()
-    return token
+
+    # Fire-and-forget — preserva timing constante da resposta
+    asyncio.create_task(send_verification_email(user.name, user.email, token))
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +121,7 @@ async def _create_verification_token(user_id: str, email: str) -> str:
 async def verify_email(token: str, db: AsyncSession) -> None:
     redis = get_redis()
     key = _verify_token_key(token)
-    raw = await redis.get(key)
+    raw = await redis.getdel(key)
     if raw is None:
         raise InvalidVerificationTokenError
 
@@ -123,7 +132,24 @@ async def verify_email(token: str, db: AsyncSession) -> None:
 
     user.is_verified = True
     await db.commit()
-    await redis.delete(key)
+
+
+async def resend_verification_email(
+    email: str, db: AsyncSession, request: Request,
+) -> None:
+    """Anti-enum: sempre no-op silencioso salvo se user existe + não-verificado."""
+    user = await _get_user_by_email(email, db)
+
+    if user is None:
+        logger.info("Resend: email inexistente (hash=%s)", _hash_email(email))
+        return
+
+    if user.is_verified:
+        logger.info("Resend: email já verificado (hash=%s)", _hash_email(email))
+        return
+
+    token = await _create_verification_token(str(user.id), user.email)
+    asyncio.create_task(send_verification_email(user.name, user.email, token))
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +160,9 @@ async def login_user(
     email: str, password: str, db: AsyncSession, request: Request,
 ) -> tuple[User, str]:
     """Returns (user, session_token). Raises on failure."""
+    await check_login_lockout(email)
+
+    client_ip = request.client.host if request.client else "unknown"
     user = await _get_user_by_email(email, db)
 
     if user is None:
@@ -142,12 +171,19 @@ async def login_user(
             _ph.verify(_DUMMY_HASH, password)
         except VerifyMismatchError:
             pass
+        await record_login_failure(email)
+        logger.warning("Login failed: email=%s ip=%s reason=user_not_found", email, client_ip)
         raise InvalidCredentialsError
 
     try:
         _ph.verify(user.password_hash, password)
     except VerifyMismatchError:
+        await record_login_failure(email)
+        logger.warning("Login failed: email=%s ip=%s reason=wrong_password", email, client_ip)
         raise InvalidCredentialsError from None
+
+    # Password correct — clear failure counter regardless of verification status
+    await clear_login_failures(email)
 
     if not user.is_verified:
         # Only reveal after correct credentials — no enumeration risk

@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from urllib.parse import urlparse
 
@@ -23,6 +24,7 @@ from app.core.security import (
 logger = logging.getLogger(__name__)
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+_UA_VERSIONS = re.compile(r"\d+\.\d+[\d.]*")
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +42,34 @@ def _get_client_ip(request: Request) -> str:
         if real_ip:
             return real_ip.strip()
     return peer_ip
+
+
+def _stable_ua(ua: str) -> str:
+    """Strip version numbers from UA for resilient session binding."""
+    return _UA_VERSIONS.sub("*", ua)
+
+
+def _check_origin(request: Request) -> JSONResponse | None:
+    """Validate Origin or Referer against ALLOWED_ORIGINS.
+    Returns error response or None if valid."""
+    origin = request.headers.get("origin")
+    referer = request.headers.get("referer")
+
+    if origin:
+        if origin not in settings.ALLOWED_ORIGINS:
+            return _error_json("ORIGIN_REJECTED", "Origin not allowed", 403)
+    elif referer:
+        parsed = urlparse(referer)
+        referer_origin = f"{parsed.scheme}://{parsed.netloc}"
+        if referer_origin not in settings.ALLOWED_ORIGINS:
+            return _error_json("ORIGIN_REJECTED", "Origin not allowed", 403)
+    else:
+        return _error_json(
+            "ORIGIN_MISSING",
+            "Origin or Referer header required",
+            403,
+        )
+    return None
 
 
 def _error_json(code: str, message: str, status: int, headers: dict | None = None) -> JSONResponse:
@@ -107,7 +137,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "default-src 'none'; frame-ancestors 'none'"
         )
 
-        if settings.COOKIE_SECURE:
+        if settings.is_production:
             response.headers["Strict-Transport-Security"] = (
                 "max-age=63072000; includeSubDomains; preload"
             )
@@ -177,7 +207,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         request.state.session = None
         request.state.session_token = None
 
-        token = request.cookies.get(settings.SESSION_COOKIE_NAME)
+        token = request.cookies.get(settings.session_cookie)
         if not token:
             return await call_next(request)
 
@@ -201,7 +231,7 @@ class SessionMiddleware(BaseHTTPMiddleware):
         # User-Agent binding — hard reject on mismatch
         stored_ua = session.get("user_agent", "")
         request_ua = request.headers.get("user-agent", "")
-        if stored_ua and stored_ua != request_ua:
+        if stored_ua and _stable_ua(stored_ua) != _stable_ua(request_ua):
             await delete_session(token)
             response = await call_next(request)
             clear_session_cookies(response)
@@ -243,25 +273,15 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         # Use the validated session token from SessionMiddleware, not the raw cookie
         session_token = getattr(request.state, "session_token", None)
         if session_token is None:
+            # No session: still validate Origin/Referer to prevent Login CSRF
+            error = _check_origin(request)
+            if error:
+                return error
             return await call_next(request)
 
-        origin = request.headers.get("origin")
-        referer = request.headers.get("referer")
-
-        if origin:
-            if origin not in settings.ALLOWED_ORIGINS:
-                return _error_json("ORIGIN_REJECTED", "Origin not allowed", 403)
-        elif referer:
-            parsed = urlparse(referer)
-            referer_origin = f"{parsed.scheme}://{parsed.netloc}"
-            if referer_origin not in settings.ALLOWED_ORIGINS:
-                return _error_json("ORIGIN_REJECTED", "Origin not allowed", 403)
-        else:
-            return _error_json(
-                "ORIGIN_MISSING",
-                "Origin or Referer header required",
-                403,
-            )
+        error = _check_origin(request)
+        if error:
+            return error
 
         csrf_token = request.headers.get(settings.CSRF_HEADER_NAME)
         if not csrf_token or not verify_csrf_token(session_token, csrf_token):

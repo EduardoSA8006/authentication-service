@@ -12,6 +12,7 @@ from app.features.auth.schemas import (
     LoginRequest,
     MessageResponse,
     RegisterRequest,
+    ResendVerificationRequest,
     UserResponse,
     VerifyEmailRequest,
 )
@@ -21,6 +22,7 @@ from app.features.auth.service import (
     logout_all_sessions,
     logout_user,
     register_user,
+    resend_verification_email,
     soft_delete_user,
     verify_email,
 )
@@ -99,9 +101,9 @@ async def logout_all(
     ip = _get_client_ip(request)
     await check_rate_limit("logout:ip", ip, *rl.LOGOUT_IP)
 
-    count = await logout_all_sessions(session["user_id"])
+    await logout_all_sessions(session["user_id"])
     clear_session_cookies(response)
-    return MessageResponse(message=f"{count} sessões encerradas")
+    return MessageResponse(message="Todas as sessões foram encerradas")
 
 
 @router.post("/verify-email", response_model=MessageResponse)
@@ -117,11 +119,30 @@ async def verify_email_endpoint(
     return MessageResponse(message="Email verificado com sucesso")
 
 
+@router.post("/resend-verification", response_model=MessageResponse)
+async def resend_verification(
+    body: ResendVerificationRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    ip = _get_client_ip(request)
+    await check_rate_limit("resend:ip", ip, *rl.RESEND_IP)
+    await check_rate_limit("resend:email", body.email, *rl.RESEND_EMAIL)
+    await resend_verification_email(body.email, db, request)
+    return MessageResponse(
+        message="Se este email estiver disponível, você receberá um email de confirmação",
+    )
+
+
 @router.get("/me", response_model=UserResponse)
 async def me(
+    request: Request,
     session: dict = Depends(get_current_session),
     db: AsyncSession = Depends(get_db),
 ):
+    ip = _get_client_ip(request)
+    await check_rate_limit("me:ip", ip, *rl.ME_IP)
+
     user = await get_user_from_session(session, db)
     return UserResponse.model_validate(user)
 

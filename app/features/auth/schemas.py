@@ -1,7 +1,7 @@
 import uuid
 from datetime import date, datetime
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.features.auth.validators import (
     validate_and_format_name,
@@ -41,7 +41,7 @@ class RegisterRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     email: str
-    password: str
+    password: str = Field(max_length=128)
 
     @field_validator("email")
     @classmethod
@@ -51,6 +51,15 @@ class LoginRequest(BaseModel):
 
 class VerifyEmailRequest(BaseModel):
     token: str
+
+
+class ResendVerificationRequest(BaseModel):
+    email: str
+
+    @field_validator("email")
+    @classmethod
+    def check_email(cls, v: str) -> str:
+        return validate_and_normalize_email(v)
 
 
 class UserResponse(BaseModel):
@@ -65,7 +74,7 @@ class UserResponse(BaseModel):
 
 
 class DeleteAccountRequest(BaseModel):
-    password: str
+    password: str = Field(max_length=128)
 
 
 class MessageResponse(BaseModel):
