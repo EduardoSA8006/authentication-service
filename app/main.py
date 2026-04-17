@@ -12,12 +12,22 @@ from app.core.error_handlers import register_error_handlers
 from app.core.middleware import (
     CSRFMiddleware,
     RateLimitMiddleware,
+    RequestIDMiddleware,
     RequestSizeLimitMiddleware,
     SecurityHeadersMiddleware,
     SessionMiddleware,
 )
 from app.core.redis import close_redis, get_redis, init_redis
+from app.core.request_id import RequestIDFilter
 from app.features.auth.service import purge_soft_deleted_users
+
+# Configura logging com request_id em toda linha — correlation pra incident response
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(request_id)s] %(levelname)s %(name)s: %(message)s",
+)
+for _handler in logging.root.handlers:
+    _handler.addFilter(RequestIDFilter())
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +77,7 @@ app = FastAPI(
 register_error_handlers(app)
 
 # Middleware stack — last added = outermost = runs first on request.
-# Request flow: TrustedHost → SecurityHeaders → RateLimit → CORS
+# Request flow: RequestID → TrustedHost → SecurityHeaders → RateLimit → CORS
 #               → SizeLimit → Session → CSRF → Route
 app.add_middleware(CSRFMiddleware)
 app.add_middleware(SessionMiddleware)
@@ -77,11 +87,13 @@ app.add_middleware(
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allow_headers=["Content-Type", settings.CSRF_HEADER_NAME],
+    allow_headers=["Content-Type", settings.CSRF_HEADER_NAME, "X-Request-ID"],
 )
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.ALLOWED_HOSTS)
+# RequestID deve ser o MAIS externo — todos os outros logs herdam o contextvar
+app.add_middleware(RequestIDMiddleware)
 
 
 from app.features.auth.router import router as auth_router  # noqa: E402

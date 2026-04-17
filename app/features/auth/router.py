@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.middleware import _get_client_ip
+from app.core.middleware import get_client_ip
 from app.core.security import clear_session_cookies, set_session_cookies
 from app.shared.dependencies import get_current_session
 from app.features.auth import rate_limit as rl
@@ -36,7 +36,7 @@ async def register(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("register:ip", ip, *rl.REGISTER_IP)
     await check_rate_limit("register:email", body.email, *rl.REGISTER_EMAIL)
 
@@ -61,7 +61,7 @@ async def login(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("login:ip", ip, *rl.LOGIN_IP)
     await check_rate_limit("login:email", body.email, *rl.LOGIN_EMAIL)
 
@@ -82,7 +82,7 @@ async def logout(
     response: Response,
     session: dict = Depends(get_current_session),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("logout:ip", ip, *rl.LOGOUT_IP)
 
     token = getattr(request.state, "session_token", None)
@@ -98,7 +98,7 @@ async def logout_all(
     response: Response,
     session: dict = Depends(get_current_session),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("logout:ip", ip, *rl.LOGOUT_IP)
 
     await logout_all_sessions(session["user_id"])
@@ -112,7 +112,7 @@ async def verify_email_endpoint(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("verify:ip", ip, *rl.VERIFY_IP)
 
     await verify_email(body.token, db)
@@ -125,7 +125,7 @@ async def resend_verification(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("resend:ip", ip, *rl.RESEND_IP)
     await check_rate_limit("resend:email", body.email, *rl.RESEND_EMAIL)
     await resend_verification_email(body.email, db, request)
@@ -140,7 +140,7 @@ async def me(
     session: dict = Depends(get_current_session),
     db: AsyncSession = Depends(get_db),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("me:ip", ip, *rl.ME_IP)
 
     user = await get_user_from_session(session, db)
@@ -155,8 +155,9 @@ async def delete_account(
     session: dict = Depends(get_current_session),
     db: AsyncSession = Depends(get_db),
 ):
-    ip = _get_client_ip(request)
+    ip = get_client_ip(request)
     await check_rate_limit("delete:ip", ip, *rl.DELETE_ACCOUNT_IP)
+    await check_rate_limit("delete:user", session["user_id"], *rl.DELETE_ACCOUNT_USER)
 
     await soft_delete_user(session["user_id"], body.password, db)
     clear_session_cookies(response)

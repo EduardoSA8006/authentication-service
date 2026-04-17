@@ -1,22 +1,19 @@
 import logging
 
 from app.core.exceptions import RateLimitedError, ServiceUnavailableError
+from app.core.rate_limit import sliding_window_incr
 from app.core.redis import get_redis
 
 logger = logging.getLogger(__name__)
 
 
 async def check_rate_limit(scope: str, key: str, limit: int, window: int) -> None:
+    """Per-endpoint rate limit via sliding window.
+    Raises RateLimitedError se excedido, ServiceUnavailableError se Redis down."""
     try:
-        redis = get_redis()
         redis_key = f"rl:{scope}:{key}"
-        pipe = redis.pipeline()
-        pipe.incr(redis_key)
-        pipe.expire(redis_key, window, nx=True)
-        count, _ = await pipe.execute()
+        count, retry_after = await sliding_window_incr(redis_key, limit, window)
         if count > limit:
-            pttl = await redis.pttl(redis_key)
-            retry_after = max(pttl // 1000, 1)
             raise RateLimitedError(headers={"Retry-After": str(retry_after)})
     except RateLimitedError:
         raise
@@ -33,6 +30,7 @@ LOGIN_EMAIL = (5, 300)
 VERIFY_IP = (10, 60)
 LOGOUT_IP = (10, 60)
 DELETE_ACCOUNT_IP = (3, 60)
+DELETE_ACCOUNT_USER = (5, 300)   # 5 por 5min por user — evita password probing via /delete
 ME_IP = (30, 60)
 RESEND_IP = (3, 3600)
 RESEND_EMAIL = (1, 600)
@@ -45,11 +43,17 @@ _LOCKOUT_THRESHOLD = 10
 _LOCKOUT_BASE_WINDOW = 900  # 15 minutes
 
 
-async def check_login_lockout(email: str) -> None:
-    """Block login if accumulated failures exceed threshold."""
+def _lockout_key(email: str, ip: str) -> str:
+    """Lockout é por (email, ip) — impede DoS de conta via email conhecido.
+    Atacante de um IP consegue se auto-lockar, vítima em outro IP não é afetada."""
+    return f"login_failures:{email}:{ip}"
+
+
+async def check_login_lockout(email: str, ip: str) -> None:
+    """Block login if accumulated failures for this (email, ip) pair exceed threshold."""
     try:
         redis = get_redis()
-        key = f"login_failures:{email}"
+        key = _lockout_key(email, ip)
         count = await redis.get(key)
         if count and int(count) >= _LOCKOUT_THRESHOLD:
             pttl = await redis.pttl(key)
@@ -62,11 +66,11 @@ async def check_login_lockout(email: str) -> None:
         raise ServiceUnavailableError
 
 
-async def record_login_failure(email: str) -> None:
+async def record_login_failure(email: str, ip: str) -> None:
     """Increment failure counter with exponential backoff window."""
     try:
         redis = get_redis()
-        key = f"login_failures:{email}"
+        key = _lockout_key(email, ip)
         pipe = redis.pipeline()
         pipe.incr(key)
         pipe.expire(key, _LOCKOUT_BASE_WINDOW, nx=True)
@@ -79,10 +83,10 @@ async def record_login_failure(email: str) -> None:
         logger.warning("Failed to record login failure")
 
 
-async def clear_login_failures(email: str) -> None:
+async def clear_login_failures(email: str, ip: str) -> None:
     """Clear failure counter on successful login."""
     try:
         redis = get_redis()
-        await redis.delete(f"login_failures:{email}")
+        await redis.delete(_lockout_key(email, ip))
     except Exception:
         pass

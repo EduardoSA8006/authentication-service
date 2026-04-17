@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import secrets
+import uuid
 from datetime import UTC, date, datetime, timedelta
 
 from argon2 import PasswordHasher
@@ -18,10 +19,12 @@ from app.core.security import (
     delete_all_user_sessions,
     delete_session,
 )
+from app.core.password_breach import is_password_breached
 from app.features.auth.exceptions import (
     EmailNotVerifiedError,
     InvalidCredentialsError,
     InvalidVerificationTokenError,
+    PasswordBreachedError,
 )
 from app.features.auth.models import User
 from app.features.auth.rate_limit import (
@@ -32,7 +35,17 @@ from app.features.auth.rate_limit import (
 
 logger = logging.getLogger(__name__)
 
-_ph = PasswordHasher()
+# Argon2id params explícitos — previne mudança silenciosa em upgrades da lib.
+# Baseline OWASP (2024): time_cost≥2, memory_cost≥19 MiB. Aqui subimos para
+# 64 MiB de memory_cost — mais resistente a ataques GPU/ASIC. `check_needs_rehash`
+# no login upgrade automaticamente quando esses valores forem aumentados.
+_ph = PasswordHasher(
+    time_cost=3,
+    memory_cost=65536,   # 64 MiB
+    parallelism=4,
+    hash_len=32,
+    salt_len=16,
+)
 _DUMMY_HASH = _ph.hash("dummy-password-for-constant-time-comparison")
 
 _VERIFY_TTL = 86400  # 24 hours
@@ -78,11 +91,36 @@ async def register_user(
     request: Request,
 ) -> None:
     """Register a new user. Anti-enum: retorna silenciosamente se email existe."""
+    # HIBP check ANTES do SELECT — ambos os caminhos pagam o custo,
+    # preservando timing parity (H-2 anti-enum).
+    if await is_password_breached(password):
+        raise PasswordBreachedError
+
     # Always hash to keep constant timing regardless of email existence
     password_hash = _ph.hash(password)
 
     existing = await _get_user_by_email(email, db, include_deleted=True)
     if existing is not None:
+        # Anti-enum timing equalization: faz INSERT+flush+Redis equivalente
+        # ao caminho feliz, dentro de um SAVEPOINT que é revertido.
+        # Sem isso, caminho "email existe" retorna ~10-20ms mais rápido que
+        # "email novo" → atacante enumera via latência.
+        dummy_uuid = uuid.uuid4()
+        dummy_email = f"_timing_dummy_{dummy_uuid.hex[:12]}@invalid.local"
+        sp = await db.begin_nested()
+        try:
+            dummy = User(
+                name=name,
+                email=dummy_email,
+                password_hash=password_hash,
+                date_of_birth=date_of_birth,
+            )
+            db.add(dummy)
+            await db.flush()
+        finally:
+            await sp.rollback()
+        # Dummy token em Redis (custo ≈ real) — expira em 24h
+        await _create_verification_token(str(dummy_uuid), dummy_email)
         return
 
     user = User(
@@ -160,9 +198,12 @@ async def login_user(
     email: str, password: str, db: AsyncSession, request: Request,
 ) -> tuple[User, str]:
     """Returns (user, session_token). Raises on failure."""
-    await check_login_lockout(email)
+    # Use IP validado via trusted-proxy walk (não o raw client.host)
+    from app.core.middleware import get_client_ip
+    client_ip = get_client_ip(request)
 
-    client_ip = request.client.host if request.client else "unknown"
+    await check_login_lockout(email, client_ip)
+
     user = await _get_user_by_email(email, db)
 
     if user is None:
@@ -171,19 +212,25 @@ async def login_user(
             _ph.verify(_DUMMY_HASH, password)
         except VerifyMismatchError:
             pass
-        await record_login_failure(email)
-        logger.warning("Login failed: email=%s ip=%s reason=user_not_found", email, client_ip)
+        await record_login_failure(email, client_ip)
+        logger.warning(
+            "Login failed: hash=%s ip=%s reason=user_not_found",
+            _hash_email(email), client_ip,
+        )
         raise InvalidCredentialsError
 
     try:
         _ph.verify(user.password_hash, password)
     except VerifyMismatchError:
-        await record_login_failure(email)
-        logger.warning("Login failed: email=%s ip=%s reason=wrong_password", email, client_ip)
+        await record_login_failure(email, client_ip)
+        logger.warning(
+            "Login failed: hash=%s ip=%s reason=wrong_password",
+            _hash_email(email), client_ip,
+        )
         raise InvalidCredentialsError from None
 
     # Password correct — clear failure counter regardless of verification status
-    await clear_login_failures(email)
+    await clear_login_failures(email, client_ip)
 
     if not user.is_verified:
         # Only reveal after correct credentials — no enumeration risk

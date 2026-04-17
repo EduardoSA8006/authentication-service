@@ -17,7 +17,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:17.4-alpine
+        image: postgres:17.4-alpine@sha256:7062a2109c4b51f3c792c7ea01e83ed12ef9a980886e3b3d380a7d2e5f6ce3f5
         env:
           POSTGRES_USER: auth
           POSTGRES_PASSWORD: auth
@@ -31,7 +31,7 @@ jobs:
           --health-retries 10
 
       redis:
-        image: redis:7.4-alpine
+        image: redis:7.4-alpine@sha256:119c9edaa6389b4c141f7faa74dae3f3b91ac50c3376d39596044ef07c2592e2
         ports:
           - 6379:6379
         options: >-
@@ -41,7 +41,7 @@ jobs:
           --health-retries 10
 
       mailhog:
-        image: mailhog/mailhog:v1.0.1
+        image: mailhog/mailhog:v1.0.1@sha256:8d76a3d4ffa32a3661311944007a415332c4bb855657f4f6c57996405c009bea
         ports:
           - 1025:1025
           - 8025:8025
@@ -69,6 +69,7 @@ jobs:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       MINIO_SECURE: "false"
+      HIBP_ENABLED: "false"
 
     steps:
       - uses: actions/checkout@v4
@@ -111,3 +112,54 @@ jobs:
           name: coverage-xml
           path: coverage.xml
           retention-days: 7
+
+  security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-in-project: true
+
+      - name: Cache virtualenv
+        id: cache-venv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py312-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        if: steps.cache-venv.outputs.cache-hit != 'true'
+        run: poetry install --no-root
+
+      - name: pip-audit (CVEs em deps Python)
+        # CVE-2025-71176: pytest (dev-only, fix em 9.0.3 mas pytest-asyncio <1.0
+        # requer pytest <9). Não afeta runtime. Revisar quando pytest-asyncio bumpar.
+        run: poetry run pip-audit --strict --ignore-vuln CVE-2025-71176
+
+      - name: Bandit SAST (HIGH/CRITICAL apenas)
+        run: poetry run bandit -r app/ -ll -ii
+
+      - name: Trivy filesystem scan (CVEs + secrets + misconfig)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: 1
+          ignore-unfixed: true
+
+      - name: Gitleaks (secrets commitados)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

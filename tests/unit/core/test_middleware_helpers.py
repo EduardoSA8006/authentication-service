@@ -1,7 +1,7 @@
 """Unit tests para helpers de middleware."""
 from unittest.mock import MagicMock
 
-from app.core.middleware import _get_client_ip, _stable_ua
+from app.core.middleware import get_client_ip, _stable_ua
 
 
 class TestClientIP:
@@ -14,33 +14,45 @@ class TestClientIP:
 
     def test_returns_peer_ip_when_no_proxy(self):
         req = self._make_request("1.2.3.4")
-        assert _get_client_ip(req) == "1.2.3.4"
+        assert get_client_ip(req) == "1.2.3.4"
 
-    def test_uses_xff_when_peer_is_trusted_proxy(self):
+    def test_uses_xff_single_ip_when_peer_is_trusted_proxy(self):
         req = self._make_request("127.0.0.1", {"x-forwarded-for": "5.6.7.8"})
-        assert _get_client_ip(req) == "5.6.7.8"
+        assert get_client_ip(req) == "5.6.7.8"
 
-    def test_uses_first_ip_in_xff_chain(self):
+    def test_picks_rightmost_nontrusted_in_xff_chain(self):
+        """Regression: evita spoofing via XFF.
+        Com nginx proxy_add_x_forwarded_for, atacante injeta valor à esquerda
+        e IP real é anexado à direita. Pegar [0] deixaria atacante controlar o IP."""
         req = self._make_request(
             "127.0.0.1",
-            {"x-forwarded-for": "5.6.7.8, 9.10.11.12"},
+            {"x-forwarded-for": "1.2.3.4, 9.10.11.12"},
         )
-        assert _get_client_ip(req) == "5.6.7.8"
+        # 9.10.11.12 é o rightmost não-confiável → IP real
+        assert get_client_ip(req) == "9.10.11.12"
+
+    def test_skips_trusted_proxies_in_chain(self):
+        req = self._make_request(
+            "127.0.0.1",
+            {"x-forwarded-for": "5.6.7.8, 127.0.0.1"},
+        )
+        # 127.0.0.1 (rightmost) é proxy confiável → vai pra próximo (5.6.7.8)
+        assert get_client_ip(req) == "5.6.7.8"
 
     def test_ignores_xff_from_non_trusted_peer(self):
         req = self._make_request("1.2.3.4", {"x-forwarded-for": "99.99.99.99"})
         # Peer não é proxy confiável → XFF ignorado
-        assert _get_client_ip(req) == "1.2.3.4"
+        assert get_client_ip(req) == "1.2.3.4"
 
     def test_falls_back_to_real_ip(self):
         req = self._make_request("127.0.0.1", {"x-real-ip": "8.8.8.8"})
-        assert _get_client_ip(req) == "8.8.8.8"
+        assert get_client_ip(req) == "8.8.8.8"
 
     def test_unknown_when_no_client(self):
         r = MagicMock()
         r.client = None
         r.headers = {}
-        assert _get_client_ip(r) == "unknown"
+        assert get_client_ip(r) == "unknown"
 
 
 class TestStableUA:

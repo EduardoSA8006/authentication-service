@@ -24,3 +24,8 @@ class InvalidVerificationTokenError(BadRequestError):
 class AccountDeletedError(UnauthorizedError):
     code = "ACCOUNT_DELETED"
     message = "Credenciais inválidas"
+
+
+class PasswordBreachedError(BadRequestError):
+    code = "PASSWORD_BREACHED"
+    message = "Esta senha apareceu em vazamento conhecido — escolha outra"

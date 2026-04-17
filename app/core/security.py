@@ -153,36 +153,51 @@ async def touch_session(token: str, session: dict) -> None:
 # Rotation
 # ---------------------------------------------------------------------------
 
-async def rotate_session(old_token: str, session: dict) -> str:
-    new_token = generate_session_token()
-    now = datetime.now(UTC)
+async def rotate_session(old_token: str, session: dict) -> str | None:
+    """Rotaciona token. Retorna novo token, ou None se rotação concorrente
+    já está em andamento (outra request venceu o lock).
 
-    # New session keeps full data with updated timestamps
-    session["last_active"] = now.isoformat()
-    session["rotated_at"] = now.isoformat()
-    session.pop("grace", None)
-
+    Lock previne last-write-wins: sem ele, 2 requests simultâneas que passam
+    de TOKEN_ROTATION_INTERVAL criam 2 sessões novas, uma fica órfã viva até TTL."""
     old_key = _session_key(old_token)
-    new_key = _session_key(new_token)
-    user_id = session["user_id"]
-
-    remaining = settings.SESSION_TTL - int(
-        (now - _parse_ts(session["created_at"])).total_seconds()
-    )
-    ttl = max(remaining, 1)
-
-    # Old session is demoted to grace: read-only, non-renewable, short TTL
-    grace_data = {**session, "grace": True}
+    lock_key = f"rotate_lock:{old_key}"
 
     redis = get_redis()
-    pipe = redis.pipeline()
-    pipe.set(new_key, json.dumps(session), ex=ttl)
-    pipe.set(old_key, json.dumps(grace_data), ex=settings.TOKEN_ROTATION_GRACE)
-    pipe.srem(_user_sessions_key(user_id), old_key)
-    pipe.sadd(_user_sessions_key(user_id), new_key)
-    await pipe.execute()
+    # SET NX — só quem adquirir o lock rotaciona; TTL 5s cobre execução normal
+    acquired = await redis.set(lock_key, "1", nx=True, ex=5)
+    if not acquired:
+        return None
 
-    return new_token
+    try:
+        new_token = generate_session_token()
+        now = datetime.now(UTC)
+
+        # New session keeps full data with updated timestamps
+        session["last_active"] = now.isoformat()
+        session["rotated_at"] = now.isoformat()
+        session.pop("grace", None)
+
+        new_key = _session_key(new_token)
+        user_id = session["user_id"]
+
+        remaining = settings.SESSION_TTL - int(
+            (now - _parse_ts(session["created_at"])).total_seconds()
+        )
+        ttl = max(remaining, 1)
+
+        # Old session is demoted to grace: read-only, non-renewable, short TTL
+        grace_data = {**session, "grace": True}
+
+        pipe = redis.pipeline()
+        pipe.set(new_key, json.dumps(session), ex=ttl)
+        pipe.set(old_key, json.dumps(grace_data), ex=settings.TOKEN_ROTATION_GRACE)
+        pipe.srem(_user_sessions_key(user_id), old_key)
+        pipe.sadd(_user_sessions_key(user_id), new_key)
+        await pipe.execute()
+
+        return new_token
+    finally:
+        await redis.delete(lock_key)
 
 
 # ---------------------------------------------------------------------------

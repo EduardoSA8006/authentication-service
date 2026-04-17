@@ -121,10 +121,16 @@ def _is_sequential(password: str, min_seq: int = 4) -> bool:
     return False
 
 
+_CONTEXT_SPLIT = re.compile(r"[\s@._\-+]+")
+
+
 def _is_contextual(password: str, context: list[str]) -> bool:
+    """Checa se senha contém partes de context (nome, email).
+    Split em whitespace + separadores de email (@ . _ - +) — pega
+    local-part do email que whitespace-only split não pegaria."""
     lower = password.lower()
     for ctx in context:
-        for part in ctx.lower().split():
+        for part in _CONTEXT_SPLIT.split(ctx.lower()):
             if len(part) >= 3 and part in lower:
                 return True
     for word in ("auth", "authentication"):
@@ -168,6 +174,9 @@ def validate_password(password: str, context: list[str] | None = None) -> None:
 
 _MIN_DOB = date(1900, 1, 1)
 _MAX_AGE_YEARS = 130
+# COPPA (EUA 13+) / GDPR-K baseline. Países EU podem exigir 14/15/16 —
+# adotantes que operem nesses países devem aumentar este valor.
+_MIN_AGE_YEARS = 13
 
 
 def validate_date_of_birth(dob: date) -> None:
@@ -182,3 +191,6 @@ def validate_date_of_birth(dob: date) -> None:
     age = (today - dob).days / 365.25
     if age > _MAX_AGE_YEARS:
         raise ValueError("Data de nascimento inválida")
+
+    if age < _MIN_AGE_YEARS:
+        raise ValueError(f"Idade mínima é {_MIN_AGE_YEARS} anos")

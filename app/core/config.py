@@ -27,7 +27,12 @@ class Settings(BaseSettings):
             f"postgresql+psycopg://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"
             f"@{self.POSTGRES_HOST}:{self.POSTGRES_PORT}/{self.POSTGRES_DB}"
         )
-        return f"{base}?sslmode=require" if self.POSTGRES_SSL else base
+        if not self.POSTGRES_SSL:
+            return base
+        if self.POSTGRES_CA_CERT:
+            return f"{base}?sslmode=verify-full&sslrootcert={self.POSTGRES_CA_CERT}"
+        # SSL sem CA — ainda usa system CA bundle (verify-ca em vez de verify-full)
+        return f"{base}?sslmode=verify-ca"
 
     # Redis
     REDIS_HOST: str = "redis"
@@ -53,7 +58,11 @@ class Settings(BaseSettings):
     ALLOWED_HOSTS: list[str]  # Required — no default
     TRUSTED_PROXY_IPS: list[str] = ["127.0.0.1", "::1"]
     POSTGRES_SSL: bool = False
+    POSTGRES_CA_CERT: str = ""           # path to CA bundle; obrigatório se POSTGRES_SSL
     REDIS_TLS: bool = False
+    REDIS_CA_CERT: str = ""              # path to CA bundle; opcional (rediss:// usa system CAs)
+    HIBP_ENABLED: bool = True            # checa senha contra HaveIBeenPwned via k-anonymity
+    HIBP_TIMEOUT: float = 3.0            # fail-open após timeout
 
     # Email / SMTP
     SMTP_HOST: str = "mailhog"
@@ -160,9 +169,24 @@ def validate_settings_for_production() -> list[str]:
 
     if not settings.POSTGRES_SSL:
         warnings.append("POSTGRES_SSL is False — database connection is unencrypted")
+    elif not settings.POSTGRES_CA_CERT:
+        warnings.append(
+            "POSTGRES_SSL is True but POSTGRES_CA_CERT is empty — "
+            "connection encrypted but certificate not fully verified (verify-ca only)"
+        )
 
     if not settings.REDIS_TLS:
         warnings.append("REDIS_TLS is False — Redis connection is unencrypted")
+    elif not settings.REDIS_CA_CERT:
+        warnings.append(
+            "REDIS_TLS is True but REDIS_CA_CERT is empty — "
+            "certificate validated against system CAs only (no custom CA pinning)"
+        )
+
+    if not settings.HIBP_ENABLED:
+        warnings.append(
+            "HIBP_ENABLED is False — passwords not checked against breach database"
+        )
 
     if settings.FRONTEND_URL.startswith("http://"):
         warnings.append("FRONTEND_URL uses http:// (not https://)")
@@ -187,5 +211,37 @@ def validate_settings_for_production() -> list[str]:
 
     if "*" in settings.ALLOWED_ORIGINS:
         warnings.append("ALLOWED_ORIGINS contains wildcard '*'")
+
+    if not settings.TRUSTED_PROXY_IPS:
+        warnings.append(
+            "TRUSTED_PROXY_IPS is empty — XFF will always be ignored. "
+            "If service is behind a reverse proxy, add its IP"
+        )
+
+    # COOKIE_DOMAIN deve ser sufixo do host de FRONTEND_URL — senão cookies
+    # não são enviados pelo browser
+    if settings.COOKIE_DOMAIN:
+        from urllib.parse import urlparse
+        fe_host = (urlparse(settings.FRONTEND_URL).hostname or "").lower()
+        cookie_dom = settings.COOKIE_DOMAIN.lstrip(".").lower()
+        if cookie_dom and fe_host and not fe_host.endswith(cookie_dom):
+            warnings.append(
+                f"COOKIE_DOMAIN='{settings.COOKIE_DOMAIN}' não é sufixo do "
+                f"FRONTEND_URL host='{fe_host}' — browser não enviará cookies"
+            )
+
+    _MAX_SESSION_TTL = 30 * 86400  # 30 dias
+    if settings.SESSION_TTL > _MAX_SESSION_TTL:
+        days = settings.SESSION_TTL // 86400
+        warnings.append(
+            f"SESSION_TTL={days} days (>30) — sessões longas aumentam janela "
+            "de hijack; provavelmente não intencional"
+        )
+
+    if settings.SESSION_IDLE_TTL > settings.SESSION_TTL:
+        warnings.append(
+            "SESSION_IDLE_TTL > SESSION_TTL — TTL absoluto sempre vence, "
+            "idle TTL é inútil. Verifique a configuração"
+        )
 
     return warnings

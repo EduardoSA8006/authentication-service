@@ -1,6 +1,5 @@
 import logging
 import re
-import time
 from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -9,6 +8,11 @@ from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.core.config import settings
+from app.core.request_id import (
+    new_request_id,
+    sanitize_request_id,
+    set_request_id,
+)
 from app.core.security import (
     clear_session_cookies,
     delete_session,
@@ -31,21 +35,37 @@ _UA_VERSIONS = re.compile(r"\d+\.\d+[\d.]*")
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _get_client_ip(request: Request) -> str:
-    """Extract real client IP respecting trusted proxies only."""
+def get_client_ip(request: Request) -> str:
+    """Extract real client IP. Walks X-Forwarded-For right-to-left, skipping
+    trusted proxies — picks the rightmost non-trusted IP (the real client as
+    seen by our edge proxy). Mitigates spoofing: attacker-controlled XFF
+    values end up leftmost after nginx's proxy_add_x_forwarded_for."""
     peer_ip = request.client.host if request.client else "unknown"
-    if peer_ip in settings.TRUSTED_PROXY_IPS:
-        forwarded = request.headers.get("x-forwarded-for")
-        if forwarded:
-            return forwarded.split(",")[0].strip()
-        real_ip = request.headers.get("x-real-ip")
-        if real_ip:
-            return real_ip.strip()
+    if peer_ip not in settings.TRUSTED_PROXY_IPS:
+        return peer_ip
+
+    forwarded = request.headers.get("x-forwarded-for", "")
+    ips = [ip.strip() for ip in forwarded.split(",") if ip.strip()]
+    for ip in reversed(ips):
+        if ip not in settings.TRUSTED_PROXY_IPS:
+            return ip
+
+    real_ip = request.headers.get("x-real-ip", "").strip()
+    if real_ip and real_ip not in settings.TRUSTED_PROXY_IPS:
+        return real_ip
+
     return peer_ip
 
 
 def _stable_ua(ua: str) -> str:
-    """Strip version numbers from UA for resilient session binding."""
+    """Strip version numbers from UA for resilient session binding.
+
+    NOTA DE SEGURANÇA: UA binding NÃO é defesa séria — qualquer atacante forja
+    User-Agent trivialmente. Este check só protege contra vetores triviais
+    (ex: extensão maliciosa que rouba cookie mas mantém UA default do Chrome).
+    Para detecção real de session hijacking, considerar fingerprint composto
+    (IP+UA+Accept-Language) com tolerância, ou histórico de devices + notificação
+    ao usuário em login novo."""
     return _UA_VERSIONS.sub("*", ua)
 
 
@@ -81,27 +101,41 @@ def _error_json(code: str, message: str, status: int, headers: dict | None = Non
 
 
 # ---------------------------------------------------------------------------
+# Request ID (correlation ID pra logs + response header)
+# ---------------------------------------------------------------------------
+
+class RequestIDMiddleware(BaseHTTPMiddleware):
+    """Gera ou propaga X-Request-ID. Seta no contextvar pra logs, ecoa na response."""
+
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        incoming = request.headers.get("x-request-id", "")
+        request_id = sanitize_request_id(incoming) if incoming else new_request_id()
+        set_request_id(request_id)
+        request.state.request_id = request_id
+
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+
+# ---------------------------------------------------------------------------
 # Rate Limiting (atomic fixed-window counter in Redis)
 # ---------------------------------------------------------------------------
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        from app.core.redis import get_redis
+        from app.core.rate_limit import sliding_window_incr
 
-        client_ip = _get_client_ip(request)
-        window = int(time.time()) // settings.RATE_LIMIT_WINDOW
-        key = f"rl:{client_ip}:{window}"
+        client_ip = get_client_ip(request)
+        key = f"rl:global:{client_ip}"
 
         try:
-            redis = get_redis()
-            pipe = redis.pipeline()
-            pipe.incr(key)
-            pipe.expire(key, settings.RATE_LIMIT_WINDOW, nx=True)
-            count, _ = await pipe.execute()
-
+            count, retry_after = await sliding_window_incr(
+                key,
+                settings.RATE_LIMIT_REQUESTS,
+                settings.RATE_LIMIT_WINDOW,
+            )
             if count > settings.RATE_LIMIT_REQUESTS:
-                pttl = await redis.pttl(key)
-                retry_after = max(pttl // 1000, 1)
                 return _error_json(
                     "RATE_LIMITED", "Too many requests", 429,
                     headers={"Retry-After": str(retry_after)},
@@ -131,6 +165,10 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["Permissions-Policy"] = (
             "camera=(), microphone=(), geolocation=(), payment=()"
         )
+        # no-store globalmente — seguro enquanto este microserviço é puro JSON
+        # API (nenhum endpoint serve assets estáticos, CSS, imagens). Se um dia
+        # servir assets, refinar: só aplicar no-store em rotas com dados
+        # sensíveis (ex: /auth/*, /me), deixar CSS/imagens com cache normal.
         response.headers["Cache-Control"] = "no-store"
         response.headers["X-XSS-Protection"] = "0"
         response.headers["Content-Security-Policy"] = (
@@ -253,8 +291,10 @@ class SessionMiddleware(BaseHTTPMiddleware):
         if needs_rotation(session):
             try:
                 new_token = await rotate_session(token, session)
-                set_session_cookies(response, new_token)
-                request.state.session_token = new_token
+                if new_token:
+                    set_session_cookies(response, new_token)
+                    request.state.session_token = new_token
+                # None = rotação concorrente venceu; essa request não toca cookies
             except Exception:
                 logger.warning("Token rotation failed, keeping current token")
 

@@ -1,4 +1,5 @@
-FROM python:3.14-slim AS base
+# Digest pinned — rebuild é determinístico. Atualizar via Dependabot/Renovate.
+FROM python:3.14-slim@sha256:bc389f7dfcb21413e72a28f491985326994795e34d2b86c8ae2f417b4e7818aa AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1

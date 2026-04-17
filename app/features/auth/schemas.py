@@ -46,7 +46,13 @@ class LoginRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def normalize_email(cls, v: str) -> str:
-        return v.strip().lower()
+        """Mesma normalização do register — IDNA + Unicode NFC.
+        Falha → fallback pra strip/lower pra preservar anti-enum
+        (service retorna InvalidCredentialsError sem revelar se email é inválido)."""
+        try:
+            return validate_and_normalize_email(v)
+        except ValueError:
+            return v.strip().lower()
 
 
 class VerifyEmailRequest(BaseModel):
