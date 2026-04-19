@@ -57,4 +57,4 @@ class TestCSRF:
             headers={"Referer": "http://localhost:3000/signup"},
         )
         # Referer parseado → localhost:3000 → está em ALLOWED_ORIGINS → passa
-        assert r.status_code in (200, 422)  # 200 feliz ou 422 se algo de validação
+        assert r.status_code in (202, 422)  # 202 register-queue ou 422 validação

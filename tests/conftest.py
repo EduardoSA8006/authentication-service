@@ -13,6 +13,7 @@ if _env_file.exists():
 
 # Imports depois do loader — garante que Settings lê env correto
 import asyncio  # noqa: E402
+import contextlib  # noqa: E402
 from datetime import date  # noqa: E402
 
 import httpx  # noqa: E402
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app.core.database import engine, get_db  # noqa: E402
 from app.core.redis import close_redis, get_redis, init_redis  # noqa: E402
+from app.features.auth import service as auth_service  # noqa: E402
 from app.features.auth.models import User  # noqa: E402
 from app.main import app  # noqa: E402
 from tests.helpers.mailhog import MailHog  # noqa: E402
@@ -49,13 +51,25 @@ async def db():
     """Transacional — ROLLBACK no teardown."""
     async with engine.connect() as conn:
         trans = await conn.begin()
-        async with AsyncSession(
+        session = AsyncSession(
             bind=conn,
             join_transaction_mode="create_savepoint",
             expire_on_commit=False,
-        ) as session:
+        )
+        try:
             yield session
-        await trans.rollback()
+            # Drena background tasks (register worker etc.) ANTES de fechar a
+            # sessão e reverter o trans — sem isso, worker in-flight na mesma
+            # conexão gera "another operation in progress" do asyncpg.
+            pending = [
+                t for t in asyncio.all_tasks()
+                if t is not asyncio.current_task() and not t.done()
+            ]
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+        finally:
+            await session.close()
+            await trans.rollback()
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -86,7 +100,18 @@ async def client(db):
     async def _override_db():
         yield db
 
+    # Worker de register usa _session_scope (context manager). Em testes
+    # reusa a sessão transacional do fixture pra manter isolamento por
+    # savepoint — commits do worker viram releases de savepoint e são
+    # revertidos no trans.rollback() de teardown.
+    @contextlib.asynccontextmanager
+    async def _test_scope():
+        yield db
+
     app.dependency_overrides[get_db] = _override_db
+    original_scope = auth_service._session_scope
+    auth_service._session_scope = _test_scope
+
     async with httpx.AsyncClient(
         transport=ASGITransport(app=app),
         base_url="http://test",
@@ -94,6 +119,19 @@ async def client(db):
     ) as c:
         yield c
     app.dependency_overrides.clear()
+    auth_service._session_scope = original_scope
+
+
+@pytest_asyncio.fixture
+async def wait_for_workers():
+    """Drena tasks de background (register-queue worker, send_verification_email).
+    Use antes de asserts que dependam do worker (DB state, mailhog)."""
+    async def _wait():
+        from app.features.auth.service import _background_tasks
+        tasks = list(_background_tasks)
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+    return _wait
 
 
 # ---------------------------------------------------------------------------

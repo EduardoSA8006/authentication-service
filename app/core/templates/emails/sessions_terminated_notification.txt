@@ -1,0 +1,10 @@
+Olá, {{ name }}
+
+Todas as sessões ativas em sua conta foram encerradas em {{ when }}.
+
+Se foi você, nenhuma ação é necessária.
+
+Se NÃO foi você, alguém com acesso à sua conta acabou de deslogar todos
+os seus dispositivos. Troque sua senha IMEDIATAMENTE:
+
+{{ reset_link }}

@@ -119,11 +119,21 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 
 # ---------------------------------------------------------------------------
-# Rate Limiting (atomic fixed-window counter in Redis)
+# Rate Limiting (sliding window counter in Redis)
 # ---------------------------------------------------------------------------
+
+# Rotas de probing (LB health checks, métricas) NÃO podem ser rate-limitadas:
+# AWS ALB/GCP LB/k8s probes batem a cada 10-30s. Se o bucket global lotar com
+# tráfego legítimo, health checks começam a receber 429, o LB marca o target
+# como unhealthy e drena instâncias — outage induzido pelo próprio limiter.
+_RATE_LIMIT_EXEMPT_PATHS = frozenset({"/health", "/metrics"})
+
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
+        if request.url.path in _RATE_LIMIT_EXEMPT_PATHS:
+            return await call_next(request)
+
         from app.core.rate_limit import sliding_window_incr
 
         client_ip = get_client_ip(request)

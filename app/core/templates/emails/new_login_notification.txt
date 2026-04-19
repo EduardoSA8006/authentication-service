@@ -1,0 +1,14 @@
+Olá, {{ name }}
+
+Detectamos um novo dispositivo acessando sua conta:
+
+  Dispositivo: {{ device }}
+  IP:          {{ ip }}
+  Quando:      {{ when }}
+
+Se foi você, ignore este email.
+
+Se NÃO foi você, sua conta pode estar comprometida. Troque sua senha
+imediatamente e revise suas sessões ativas:
+
+{{ reset_link }}

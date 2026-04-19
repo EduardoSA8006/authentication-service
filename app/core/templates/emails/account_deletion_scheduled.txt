@@ -1,0 +1,14 @@
+Olá, {{ name }}
+
+Sua conta foi marcada para exclusão.
+
+  Solicitado em: {{ when }}
+  Exclusão em:   {{ purge_at }}
+
+Durante este período (7 dias), todas as suas sessões foram encerradas e
+você não pode fazer login. Após {{ purge_at }} a conta e todos os dados
+serão permanentemente removidos.
+
+Se NÃO foi você que solicitou, alguém pode ter comprometido sua conta.
+Entre em contato com o suporte ANTES de {{ purge_at }} para cancelar
+a exclusão.

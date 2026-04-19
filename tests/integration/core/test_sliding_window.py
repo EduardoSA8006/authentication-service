@@ -52,3 +52,59 @@ class TestSlidingWindow:
         count, retry = await sliding_window_incr("test:slide", limit=10, window=1)
         assert count == 1
         assert retry == 0
+
+    async def test_concurrent_burst_exactly_limit_accepted(self, _clean_redis):
+        """N-10: sob burst concorrente, atomicidade do Lua garante que exatamente
+        `limit` requests são aceitas e o resto rejeitadas. Pré-fix (pipeline + zrem
+        fora) tinha ghost members inflando zcard entre o execute e o revert,
+        causando sub-contagem/over-rejeição sob alta concorrência."""
+        import asyncio as _aio
+
+        key = "test:concurrent"
+        limit = 10
+        total = 50
+
+        results = await _aio.gather(*[
+            sliding_window_incr(key, limit=limit, window=60)
+            for _ in range(total)
+        ])
+
+        accepted = sum(1 for count, _ in results if count <= limit)
+        rejected = sum(1 for count, _ in results if count > limit)
+
+        assert accepted == limit, f"esperado {limit} aceitos, got {accepted}"
+        assert rejected == total - limit, f"esperado {total - limit} rejeitados, got {rejected}"
+
+        # Rejeitados carregam retry_after > 0
+        for count, retry in results:
+            if count > limit:
+                assert retry > 0
+
+    async def test_retry_after_roughly_matches_window(self, _clean_redis):
+        """Sob over-limit, retry_after ≈ janela do membro mais antigo."""
+        window = 60
+        for _ in range(10):
+            await sliding_window_incr("test:retry", limit=10, window=window)
+
+        _, retry = await sliding_window_incr("test:retry", limit=10, window=window)
+        # retry_after deve ser entre 1 e window+1 (margem de cálculo)
+        assert 1 <= retry <= window + 1
+
+    async def test_over_limit_does_not_mutate_zset(self, _clean_redis):
+        """N-10: Lua não adiciona membro em over-limit → zcard estável,
+        garantindo que futura tentativa (após janela passar) começa limpa."""
+        from app.core.redis import get_redis
+
+        redis = get_redis()
+        key = "test:no-mutate"
+
+        for _ in range(10):
+            await sliding_window_incr(key, limit=10, window=60)
+        count_before = await redis.zcard(key)
+
+        # 100 tentativas over-limit — nenhum membro deve ser adicionado
+        for _ in range(100):
+            await sliding_window_incr(key, limit=10, window=60)
+
+        count_after = await redis.zcard(key)
+        assert count_after == count_before == 10

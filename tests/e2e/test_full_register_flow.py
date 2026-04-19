@@ -3,16 +3,17 @@
 
 class TestFullRegisterFlow:
     async def test_complete_flow(self, client, mailhog):
-        # 1. Register
+        # 1. Register (fire-and-forget: 202 imediato)
         r = await client.post("/auth/register", json={
             "name": "João Silva",
             "email": "e2e@test.com",
             "password": "SenhaForte@2026",
             "date_of_birth": "1990-01-01",
         })
-        assert r.status_code == 200
+        assert r.status_code == 202
 
-        # 2. Email chega com token
+        # 2. Email chega com token (mailhog.extract_verification_token faz polling,
+        # aguarda worker terminar INSERT + SMTP)
         token = await mailhog.extract_verification_token()
         assert len(token) > 20
 

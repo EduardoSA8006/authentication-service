@@ -87,7 +87,9 @@ app.add_middleware(
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH"],
-    allow_headers=["Content-Type", settings.CSRF_HEADER_NAME, "X-Request-ID"],
+    allow_headers=[
+        "Content-Type", settings.CSRF_HEADER_NAME, "X-Request-ID", "X-Captcha-Token",
+    ],
 )
 app.add_middleware(RateLimitMiddleware)
 app.add_middleware(SecurityHeadersMiddleware)

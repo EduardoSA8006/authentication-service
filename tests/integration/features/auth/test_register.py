@@ -14,11 +14,14 @@ _VALID_BODY = {
 
 class TestRegister:
     async def test_happy_path_creates_user_and_sends_email(
-        self, client, db, mailhog,
+        self, client, db, mailhog, wait_for_workers,
     ):
         r = await client.post("/auth/register", json=_VALID_BODY)
-        assert r.status_code == 200
+        assert r.status_code == 202
         assert "disponível" in r.json()["message"]
+
+        # Espera o worker background (INSERT + token + SMTP).
+        await wait_for_workers()
 
         user = (await db.execute(
             select(User).where(User.email == "joao@test.com")
@@ -29,17 +32,19 @@ class TestRegister:
         msgs = await mailhog.wait_for(count=1)
         assert msgs[0]["Content"]["Headers"]["Subject"][0] == "Confirme seu email"
 
-    async def test_duplicate_email_returns_neutral(self, client, make_user, mailhog):
+    async def test_duplicate_email_returns_neutral(
+        self, client, make_user, mailhog, wait_for_workers,
+    ):
         await make_user(email="exists@test.com")
         r = await client.post("/auth/register", json={
             **_VALID_BODY, "email": "exists@test.com", "name": "Outro Nome",
         })
-        assert r.status_code == 200
+        assert r.status_code == 202
         assert "disponível" in r.json()["message"]
 
-        # Nenhum email novo
-        import asyncio
-        await asyncio.sleep(0.1)
+        # Worker roda HIBP + lookup, vê duplicado, retorna silenciosamente.
+        await wait_for_workers()
+
         msgs = await mailhog.get_messages()
         assert len(msgs) == 0
 
@@ -110,3 +115,24 @@ class TestRegister:
         )
         assert r.status_code == 403
         assert r.json()["error"]["code"] == "ORIGIN_REJECTED"
+
+    async def test_response_body_identical_across_paths(
+        self, client, make_user, wait_for_workers,
+    ):
+        """N-2: caminhos (novo, duplicado) retornam a mesma response.
+        Regression de timing está em tests/e2e/test_register_timing_equalization.py."""
+        await make_user(email="existing@body.com")
+
+        r_dup = await client.post("/auth/register", json={
+            **_VALID_BODY, "email": "existing@body.com", "name": "Outra Pessoa",
+        })
+        await wait_for_workers()
+
+        r_new = await client.post("/auth/register", json={
+            **_VALID_BODY, "email": "fresh@body.com", "name": "Fresh User",
+        })
+        await wait_for_workers()
+
+        assert r_dup.status_code == 202
+        assert r_new.status_code == 202
+        assert r_dup.json() == r_new.json()

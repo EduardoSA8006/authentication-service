@@ -8,21 +8,27 @@ from app.shared.dependencies import get_current_session
 from app.features.auth import rate_limit as rl
 from app.features.auth.rate_limit import check_rate_limit
 from app.features.auth.schemas import (
+    ChangePasswordRequest,
     DeleteAccountRequest,
+    ForgotPasswordRequest,
     LoginRequest,
     MessageResponse,
     RegisterRequest,
     ResendVerificationRequest,
+    ResetPasswordRequest,
     UserResponse,
     VerifyEmailRequest,
 )
 from app.features.auth.service import (
+    change_password_request,
+    forgot_password,
     get_user_from_session,
     login_user,
     logout_all_sessions,
     logout_user,
     register_user,
     resend_verification_email,
+    reset_password,
     soft_delete_user,
     verify_email,
 )
@@ -30,12 +36,15 @@ from app.features.auth.service import (
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/register", response_model=MessageResponse)
+@router.post("/register", response_model=MessageResponse, status_code=202)
 async def register(
     body: RegisterRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
 ):
+    """202 Accepted — register-queue pattern. Handler não toca DB/HIBP/SMTP;
+    todo trabalho pesado vai para worker assíncrono. Resposta idêntica e em
+    µs para qualquer caminho (email novo, duplicado, ou senha breached),
+    fechando o side-channel de timing."""
     ip = get_client_ip(request)
     await check_rate_limit("register:ip", ip, *rl.REGISTER_IP)
     await check_rate_limit("register:email", body.email, *rl.REGISTER_EMAIL)
@@ -45,8 +54,6 @@ async def register(
         email=body.email,
         password=body.password,
         date_of_birth=body.date_of_birth,
-        db=db,
-        request=request,
     )
 
     return MessageResponse(
@@ -145,6 +152,60 @@ async def me(
 
     user = await get_user_from_session(session, db)
     return UserResponse.model_validate(user)
+
+
+@router.post("/forgot-password", response_model=MessageResponse, status_code=202)
+async def forgot_password_endpoint(
+    body: ForgotPasswordRequest,
+    request: Request,
+):
+    """Anti-enum: sempre 202. Worker assíncrono lida com email existente ou não."""
+    ip = get_client_ip(request)
+    await check_rate_limit("forgot_password:ip", ip, *rl.FORGOT_PASSWORD_IP)
+    await check_rate_limit("forgot_password:email", body.email, *rl.FORGOT_PASSWORD_EMAIL)
+
+    await forgot_password(body.email)
+
+    return MessageResponse(
+        message="Se este email estiver cadastrado, você receberá instruções para redefinir a senha",
+    )
+
+
+@router.post("/change-password", response_model=MessageResponse, status_code=202)
+async def change_password_endpoint(
+    body: ChangePasswordRequest,
+    request: Request,
+    session: dict = Depends(get_current_session),
+    db: AsyncSession = Depends(get_db),
+):
+    """Autenticada + CSRF + proof-of-possession da senha atual.
+    Emite email com link — troca só concretiza em /reset-password."""
+    ip = get_client_ip(request)
+    user_id = session["user_id"]
+    await check_rate_limit("change_password:ip", ip, *rl.CHANGE_PASSWORD_IP)
+    await check_rate_limit("change_password:user", user_id, *rl.CHANGE_PASSWORD_USER)
+
+    await change_password_request(user_id, body.current_password, db)
+
+    return MessageResponse(
+        message="Email de confirmação enviado para alterar sua senha",
+    )
+
+
+@router.post("/reset-password", response_model=MessageResponse)
+async def reset_password_endpoint(
+    body: ResetPasswordRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """Sincrono: valida token + nova senha, persiste hash, invalida sessões.
+    Retorna 400 se token inválido/expirado, senha fraca, ou senha em breach."""
+    ip = get_client_ip(request)
+    await check_rate_limit("reset_password:ip", ip, *rl.RESET_PASSWORD_IP)
+
+    await reset_password(body.token, body.new_password, db, ip)
+
+    return MessageResponse(message="Senha redefinida com sucesso")
 
 
 @router.post("/delete-account", response_model=MessageResponse)

@@ -64,6 +64,13 @@ class Settings(BaseSettings):
     HIBP_ENABLED: bool = True            # checa senha contra HaveIBeenPwned via k-anonymity
     HIBP_TIMEOUT: float = 3.0            # fail-open após timeout
 
+    # CAPTCHA — step-up quando Layer 2 do lockout dispara (N-6 integration)
+    CAPTCHA_ENABLED: bool = False
+    CAPTCHA_PROVIDER: str = "turnstile"  # "turnstile" (Cloudflare); futuro: hcaptcha/recaptcha
+    CAPTCHA_SECRET: str = ""             # server-side secret do provider
+    CAPTCHA_SITE_KEY: str = ""           # public, frontend usa pra renderizar widget
+    CAPTCHA_VERIFY_TIMEOUT: float = 5.0
+
     # Email / SMTP
     SMTP_HOST: str = "mailhog"
     SMTP_PORT: int = 1025
@@ -186,6 +193,17 @@ def validate_settings_for_production() -> list[str]:
     if not settings.HIBP_ENABLED:
         warnings.append(
             "HIBP_ENABLED is False — passwords not checked against breach database"
+        )
+
+    if not settings.CAPTCHA_ENABLED:
+        warnings.append(
+            "CAPTCHA_ENABLED is False — Layer 2 lockout will hard-block suspected "
+            "credential stuffing (no step-up bypass for legitimate users)"
+        )
+    elif not settings.CAPTCHA_SECRET:
+        warnings.append(
+            "CAPTCHA_ENABLED is True but CAPTCHA_SECRET is empty — verify calls "
+            "will fail-closed, locking out users during suspicious activity"
         )
 
     if settings.FRONTEND_URL.startswith("http://"):

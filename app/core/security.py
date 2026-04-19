@@ -24,6 +24,28 @@ redis.call('DEL', set_key)
 return #members
 """
 
+# Atomic touch (N-7): re-lê o estado em Redis antes de sobrescrever, pra
+# fechar o TOCTOU entre get_session (caller) e o SET que refresh o TTL.
+# Se outra request rotacionou essa chave pra grace entre um e outro, o SET
+# não dispara — grace e seu TTL curto são preservados.
+#
+# Retorna 1 se touch ocorreu, 0 se foi no-op (key deleted, grace, ou JSON inválido).
+_LUA_TOUCH = """
+local current = redis.call('GET', KEYS[1])
+if not current then
+    return 0
+end
+local ok, parsed = pcall(cjson.decode, current)
+if not ok then
+    return 0
+end
+if parsed.grace then
+    return 0
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+return 1
+"""
+
 
 # ---------------------------------------------------------------------------
 # Token generation
@@ -138,15 +160,43 @@ def needs_rotation(session: dict) -> bool:
 # Touch (update last_active + refresh TTL)
 # ---------------------------------------------------------------------------
 
+_touch_script_obj = None
+
+
+def _get_touch_script():
+    """Lazy-registered Lua script (cachea SHA1 localmente; redis-py usa
+    EVALSHA internamente com fallback pra EVAL+NOSCRIPT)."""
+    global _touch_script_obj
+    if _touch_script_obj is None:
+        _touch_script_obj = get_redis().register_script(_LUA_TOUCH)
+    return _touch_script_obj
+
+
 async def touch_session(token: str, session: dict) -> None:
+    """Atualiza last_active e refresh TTL. NO-OP para sessions em grace.
+
+    N-7: dois gates.
+    - In-memory check: short-circuit se o caller já tem dict grace — evita
+      roundtrip Redis e protege callers que bypassem o middleware.
+    - Lua atomic (CAS): re-lê o estado em Redis e aborta se grace=true lá.
+      Fecha o TOCTOU onde outra request concorrente rotacionou a sessão entre
+      get_session e touch_session — dict in-memory seria stale e sem esse
+      gate sobrescreveria o grace (TTL 60s) com TTL cheio."""
+    if session.get("grace"):
+        return
+
     now = datetime.now(UTC)
     session["last_active"] = now.isoformat()
     remaining = settings.SESSION_TTL - int(
         (now - _parse_ts(session["created_at"])).total_seconds()
     )
     ttl = max(remaining, 1)
-    redis = get_redis()
-    await redis.set(_session_key(token), json.dumps(session), ex=ttl)
+
+    script = _get_touch_script()
+    await script(
+        keys=[_session_key(token)],
+        args=[json.dumps(session), str(ttl)],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +205,13 @@ async def touch_session(token: str, session: dict) -> None:
 
 async def rotate_session(old_token: str, session: dict) -> str | None:
     """Rotaciona token. Retorna novo token, ou None se rotação concorrente
-    já está em andamento (outra request venceu o lock).
+    (lock em posse de outro) ou sequencial (outro já rotacionou, o session
+    do caller está stale) já aconteceu.
 
-    Lock previne last-write-wins: sem ele, 2 requests simultâneas que passam
-    de TOKEN_ROTATION_INTERVAL criam 2 sessões novas, uma fica órfã viva até TTL."""
+    Lock previne last-write-wins entre rotações simultâneas. CAS em
+    rotated_at previne rotações sequenciais a partir de snapshot obsoleto:
+    sem ele, 2 requests que leram a mesma sessão pré-rotação criariam 2
+    sessões novas — uma fica órfã viva até SESSION_TTL."""
     old_key = _session_key(old_token)
     lock_key = f"rotate_lock:{old_key}"
 
@@ -169,6 +222,19 @@ async def rotate_session(old_token: str, session: dict) -> str | None:
         return None
 
     try:
+        # CAS: reler estado dentro do lock. Se outra rotação (já liberou o
+        # lock) completou, old_key foi sobrescrito como grace OU o rotated_at
+        # mudou. Em ambos os casos, o session recebido do caller é stale.
+        raw = await redis.get(old_key)
+        if raw is None:
+            return None
+        current = json.loads(raw)
+        if current.get("grace") or current.get("rotated_at") != session.get("rotated_at"):
+            return None
+
+        # Fonte de verdade: estado fresco do Redis, não o dict mutado pelo caller.
+        session = current
+
         new_token = generate_session_token()
         now = datetime.now(UTC)
 

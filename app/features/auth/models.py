@@ -25,3 +25,8 @@ class User(Base):
     deleted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None,
     )
+    # N-5: HIBP breach detectado em login anterior. None = nunca detectado
+    # ou senha já foi trocada (flag deve ser limpo ao mudar senha real).
+    password_breach_detected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, default=None,
+    )
