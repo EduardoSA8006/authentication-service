@@ -8,10 +8,14 @@ N-10: toda a operação (prune + check + add + ttl + retry_after) em UM único
 script Lua. Elimina o revert pós-pipeline que tinha race sob concorrência alta
 e corta um round-trip.
 """
+import logging
 import secrets
 import time
 
+from app.core.exceptions import RateLimitedError, ServiceUnavailableError
 from app.core.redis import get_redis
+
+logger = logging.getLogger(__name__)
 
 # Script Lua atômico: prune → check → add-or-reject.
 # Retorna {count, retry_after} mantendo contrato antigo (caller checa count > limit).
@@ -80,3 +84,18 @@ async def sliding_window_incr(
         args=[now, cutoff, limit, member, window, window + 1],
     )
     return int(result[0]), int(result[1])
+
+
+async def check_rate_limit(scope: str, key: str, limit: int, window: int) -> None:
+    """Per-endpoint rate limit via sliding window.
+    Raises RateLimitedError se excedido, ServiceUnavailableError se Redis down."""
+    try:
+        redis_key = f"rl:{scope}:{key}"
+        count, retry_after = await sliding_window_incr(redis_key, limit, window)
+        if count > limit:
+            raise RateLimitedError(headers={"Retry-After": str(retry_after)})
+    except RateLimitedError:
+        raise
+    except Exception:
+        logger.warning("Rate limit unavailable for %s, rejecting request", scope)
+        raise ServiceUnavailableError

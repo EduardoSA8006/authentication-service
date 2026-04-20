@@ -130,4 +130,4 @@ class TestDateOfBirth:
 
     def test_rejects_over_130_years(self):
         with pytest.raises(ValueError, match="inválida"):
-            validate_date_of_birth(date.today().replace(year=date.today().year - 131))
+            validate_date_of_birth(date(date.today().year - 131, 6, 15))

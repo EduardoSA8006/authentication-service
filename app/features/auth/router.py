@@ -6,7 +6,7 @@ from app.core.middleware import get_client_ip
 from app.core.security import clear_session_cookies, set_session_cookies
 from app.shared.dependencies import get_current_session
 from app.features.auth import rate_limit as rl
-from app.features.auth.rate_limit import check_rate_limit
+from app.core.rate_limit import check_rate_limit
 from app.features.auth.schemas import (
     ChangePasswordRequest,
     DeleteAccountRequest,
@@ -70,7 +70,6 @@ async def login(
 ):
     ip = get_client_ip(request)
     await check_rate_limit("login:ip", ip, *rl.LOGIN_IP)
-    await check_rate_limit("login:email", body.email, *rl.LOGIN_EMAIL)
 
     user, session_token = await login_user(
         email=body.email,
@@ -130,12 +129,11 @@ async def verify_email_endpoint(
 async def resend_verification(
     body: ResendVerificationRequest,
     request: Request,
-    db: AsyncSession = Depends(get_db),
 ):
     ip = get_client_ip(request)
     await check_rate_limit("resend:ip", ip, *rl.RESEND_IP)
     await check_rate_limit("resend:email", body.email, *rl.RESEND_EMAIL)
-    await resend_verification_email(body.email, db, request)
+    await resend_verification_email(body.email)
     return MessageResponse(
         message="Se este email estiver disponível, você receberá um email de confirmação",
     )

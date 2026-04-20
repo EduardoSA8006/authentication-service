@@ -28,6 +28,9 @@ class TestFullRegisterFlow:
         assert r.status_code == 200
         assert r.cookies.get("session")
         csrf = r.cookies["csrf_token"]
+        set_cookie = r.headers.get("set-cookie", "")
+        assert "HttpOnly" in set_cookie
+        assert "SameSite=Strict" in set_cookie
 
         # 5. /me
         client.headers["X-CSRF-Token"] = csrf

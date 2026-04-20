@@ -1,5 +1,3 @@
-import hashlib
-import hmac
 import logging
 from datetime import datetime
 from email.message import EmailMessage
@@ -10,6 +8,7 @@ import aiosmtplib
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from app.core.config import settings
+from app.core.security import hash_email
 
 logger = logging.getLogger(__name__)
 
@@ -82,11 +81,11 @@ async def send_verification_email(name: str, email: str, token: str) -> None:
             template_name="verification",
             context={"name": name, "link": link},
         )
-        logger.info("Verification email sent (hash=%s)", _hash_email(email))
+        logger.info("Verification email sent (hash=%s)", hash_email(email))
     except Exception:
         logger.warning(
             "Failed to send verification email (hash=%s)",
-            _hash_email(email),
+            hash_email(email),
             exc_info=True,
         )
 
@@ -116,12 +115,12 @@ async def send_password_reset_email(
         )
         logger.info(
             "Password reset email sent (hash=%s flow=%s)",
-            _hash_email(email), flow,
+            hash_email(email), flow,
         )
     except Exception:
         logger.warning(
             "Failed to send password reset email (hash=%s flow=%s)",
-            _hash_email(email), flow,
+            hash_email(email), flow,
             exc_info=True,
         )
 
@@ -192,11 +191,11 @@ async def send_new_login_notification(
                 "reset_link": _reset_link(),
             },
         )
-        logger.info("New login notification sent (hash=%s)", _hash_email(email))
+        logger.info("New login notification sent (hash=%s)", hash_email(email))
     except Exception:
         logger.warning(
             "Failed to send new login notification (hash=%s)",
-            _hash_email(email), exc_info=True,
+            hash_email(email), exc_info=True,
         )
 
 
@@ -215,11 +214,11 @@ async def send_password_changed_notification(
                 "when": _fmt_when(when),
             },
         )
-        logger.info("Password changed notification sent (hash=%s)", _hash_email(email))
+        logger.info("Password changed notification sent (hash=%s)", hash_email(email))
     except Exception:
         logger.warning(
             "Failed to send password changed notification (hash=%s)",
-            _hash_email(email), exc_info=True,
+            hash_email(email), exc_info=True,
         )
 
 
@@ -238,11 +237,11 @@ async def send_account_deletion_notification(
                 "purge_at": _fmt_when(purge_at),
             },
         )
-        logger.info("Account deletion notification sent (hash=%s)", _hash_email(email))
+        logger.info("Account deletion notification sent (hash=%s)", hash_email(email))
     except Exception:
         logger.warning(
             "Failed to send account deletion notification (hash=%s)",
-            _hash_email(email), exc_info=True,
+            hash_email(email), exc_info=True,
         )
 
 
@@ -262,12 +261,12 @@ async def send_sessions_terminated_notification(
             },
         )
         logger.info(
-            "Sessions terminated notification sent (hash=%s)", _hash_email(email),
+            "Sessions terminated notification sent (hash=%s)", hash_email(email),
         )
     except Exception:
         logger.warning(
             "Failed to send sessions terminated notification (hash=%s)",
-            _hash_email(email), exc_info=True,
+            hash_email(email), exc_info=True,
         )
 
 
@@ -282,24 +281,11 @@ async def send_password_breach_advisory(name: str, email: str) -> None:
             template_name="password_breach_advisory",
             context={"name": name, "link": link},
         )
-        logger.info("Password breach advisory sent (hash=%s)", _hash_email(email))
+        logger.info("Password breach advisory sent (hash=%s)", hash_email(email))
     except Exception:
         logger.warning(
             "Failed to send password breach advisory (hash=%s)",
-            _hash_email(email),
+            hash_email(email),
             exc_info=True,
         )
 
-
-# ---------------------------------------------------------------------------
-# Log hygiene — zero PII
-# ---------------------------------------------------------------------------
-
-def _hash_email(email: str) -> str:
-    """HMAC-SHA256(SECRET_KEY, email)[:16] — correlaciona logs sem vazar PII.
-    Segue o mesmo padrão de core/security.py::generate_csrf_token."""
-    return hmac.new(
-        settings.SECRET_KEY.encode(),
-        email.encode(),
-        hashlib.sha256,
-    ).hexdigest()[:16]

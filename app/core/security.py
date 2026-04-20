@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import re
 import secrets
 from datetime import UTC, datetime
 
@@ -10,6 +11,26 @@ from app.core.config import settings
 from app.core.redis import get_redis
 
 _TOKEN_BYTES = 36  # 36 bytes → exactly 48 chars in base64url
+
+_UA_VERSIONS = re.compile(r"\d+\.\d+[\d.]*")
+
+
+def _stable_ua(ua: str) -> str:
+    """Strip version numbers from UA for resilient session binding.
+
+    NOTA DE SEGURANÇA: UA binding NÃO é defesa séria — qualquer atacante forja
+    User-Agent trivialmente. Este check só protege contra vetores triviais
+    (ex: extensão maliciosa que rouba cookie mas mantém UA default do Chrome)."""
+    return _UA_VERSIONS.sub("*", ua)
+
+
+def hash_email(email: str) -> str:
+    """HMAC-SHA256(SECRET_KEY, email)[:16] — correlaciona logs sem vazar PII."""
+    return hmac.new(
+        settings.SECRET_KEY.encode(),
+        email.encode(),
+        hashlib.sha256,
+    ).hexdigest()[:16]
 
 # Lua script for atomic invalidation of all sessions for a user.
 # Reads the set, deletes every session key, then deletes the set itself.
@@ -103,9 +124,10 @@ async def create_session(
     }
     redis = get_redis()
     key = _session_key(token)
-    pipe = redis.pipeline()
+    pipe = redis.pipeline(transaction=True)
     pipe.set(key, json.dumps(data), ex=settings.SESSION_TTL)
     pipe.sadd(_user_sessions_key(user_id), key)
+    pipe.expire(_user_sessions_key(user_id), settings.SESSION_TTL + 3600)
     await pipe.execute()
     return token
 
@@ -254,11 +276,12 @@ async def rotate_session(old_token: str, session: dict) -> str | None:
         # Old session is demoted to grace: read-only, non-renewable, short TTL
         grace_data = {**session, "grace": True}
 
-        pipe = redis.pipeline()
+        pipe = redis.pipeline(transaction=True)
         pipe.set(new_key, json.dumps(session), ex=ttl)
         pipe.set(old_key, json.dumps(grace_data), ex=settings.TOKEN_ROTATION_GRACE)
         pipe.srem(_user_sessions_key(user_id), old_key)
         pipe.sadd(_user_sessions_key(user_id), new_key)
+        pipe.expire(_user_sessions_key(user_id), ttl + 3600)
         await pipe.execute()
 
         return new_token

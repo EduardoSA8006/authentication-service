@@ -14,7 +14,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session
 from app.core.email import (
-    _hash_email,
     send_account_deletion_notification,
     send_new_login_notification,
     send_password_breach_advisory,
@@ -25,9 +24,11 @@ from app.core.email import (
 )
 from app.core.redis import get_redis
 from app.core.security import (
+    _stable_ua,
     create_session,
     delete_all_user_sessions,
     delete_session,
+    hash_email,
 )
 from app.core.password_breach import is_password_breached
 from app.features.auth.exceptions import (
@@ -119,7 +120,6 @@ async def _new_device_notification_worker(
 ) -> None:
     """Detecta novo dispositivo via fingerprint do UA estável e dispara email."""
     try:
-        from app.core.middleware import _stable_ua
         stable = _stable_ua(ua) if ua else ""
         if not stable:
             return
@@ -129,7 +129,7 @@ async def _new_device_notification_worker(
         key = _known_fingerprints_key(user_id)
         # scard + sadd atômico em pipeline (transação), evita race entre
         # dois logins simultâneos do mesmo novo device (só um manda email).
-        pipe = redis.pipeline()
+        pipe = redis.pipeline(transaction=True)
         pipe.scard(key)
         pipe.sadd(key, fingerprint)
         existing_count, added = await pipe.execute()
@@ -206,7 +206,7 @@ async def _register_worker(
     """Worker silencioso: falhas (HIBP breach, email duplicado, SMTP down)
     são logadas e engolidas. O cliente já recebeu 202 — qualquer erro aqui
     seria invisível ao cliente (e ao atacante enumerador)."""
-    email_hash = _hash_email(email)
+    email_hash = hash_email(email)
     try:
         if await is_password_breached(password):
             logger.info("Register worker: password breached (email_hash=%s)", email_hash)
@@ -269,22 +269,28 @@ async def verify_email(token: str, db: AsyncSession) -> None:
     await db.commit()
 
 
-async def resend_verification_email(
-    email: str, db: AsyncSession, request: Request,
-) -> None:
-    """Anti-enum: sempre no-op silencioso salvo se user existe + não-verificado."""
-    user = await _get_user_by_email(email, db)
+async def resend_verification_email(email: str) -> None:
+    """Anti-enum: spawna worker e retorna em µs — latência idêntica para
+    email inexistente, já-verificado, ou não-verificado."""
+    _spawn(_resend_verification_worker(email))
 
-    if user is None:
-        logger.info("Resend: email inexistente (hash=%s)", _hash_email(email))
-        return
 
-    if user.is_verified:
-        logger.info("Resend: email já verificado (hash=%s)", _hash_email(email))
-        return
-
-    token = await _create_verification_token(str(user.id), user.email)
-    _spawn(send_verification_email(user.name, user.email, token))
+async def _resend_verification_worker(email: str) -> None:
+    email_hash = hash_email(email)
+    try:
+        async with _session_scope() as db:
+            user = await _get_user_by_email(email, db)
+            if user is None:
+                logger.info("Resend: email inexistente (hash=%s)", email_hash)
+                return
+            if user.is_verified:
+                logger.info("Resend: email já verificado (hash=%s)", email_hash)
+                return
+            token = await _create_verification_token(str(user.id), user.email)
+            user_name, user_email = user.name, user.email
+        await send_verification_email(user_name, user_email, token)
+    except Exception:
+        logger.exception("Resend verification worker failed (hash=%s)", email_hash)
 
 
 # ---------------------------------------------------------------------------
@@ -316,7 +322,7 @@ async def forgot_password(email: str) -> None:
 
 
 async def _forgot_password_worker(email: str) -> None:
-    email_hash = _hash_email(email)
+    email_hash = hash_email(email)
     try:
         async with _session_scope() as db:
             user = await _get_user_by_email(email, db)
@@ -402,7 +408,7 @@ async def reset_password(
 
     logger.info(
         "Password reset completed (user_id=%s hash=%s)",
-        user_id, _hash_email(user.email),
+        user_id, hash_email(user.email),
     )
 
     # Notificação de senha alterada (out-of-band confirmation).
@@ -441,7 +447,7 @@ async def login_user(
         await record_login_failure(email, client_ip)
         logger.warning(
             "Login failed: hash=%s ip=%s reason=user_not_found",
-            _hash_email(email), client_ip,
+            hash_email(email), client_ip,
         )
         raise InvalidCredentialsError
 
@@ -451,7 +457,7 @@ async def login_user(
         await record_login_failure(email, client_ip)
         logger.warning(
             "Login failed: hash=%s ip=%s reason=wrong_password",
-            _hash_email(email), client_ip,
+            hash_email(email), client_ip,
         )
         raise InvalidCredentialsError from None
 
@@ -509,7 +515,7 @@ async def _password_breach_check_worker(user_id: str, password: str) -> None:
 
             logger.info(
                 "Password breach detected for user (hash=%s)",
-                _hash_email(user.email),
+                hash_email(user.email),
             )
             user_name, user_email = user.name, user.email
 

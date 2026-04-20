@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Authentication Service"
-    ENVIRONMENT: str = "development"  # "development" | "production"
+    ENVIRONMENT: str = "development"  # "development" | "staging" | "production"
     DEBUG: bool = False
 
     # PostgreSQL
@@ -104,7 +104,7 @@ class Settings(BaseSettings):
 
     @property
     def is_production(self) -> bool:
-        return self.ENVIRONMENT != "development"
+        return self.ENVIRONMENT == "production"
 
     @property
     def session_cookie(self) -> str:

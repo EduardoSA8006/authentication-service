@@ -5,6 +5,7 @@ from unittest.mock import patch
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 
+from app.core.redis import get_redis
 from app.features.auth.service import _create_reset_token, _reset_token_key
 
 
@@ -45,6 +46,20 @@ class TestResetPassword:
     async def test_invalid_token_400(self, client):
         r = await client.post("/auth/reset-password", json={
             "token": "nonexistent-token", "new_password": _NEW_PASSWORD,
+        })
+        assert r.status_code == 400
+        assert r.json()["error"]["code"] == "INVALID_RESET_TOKEN"
+
+    async def test_expired_token_400(self, client, make_user):
+        """Token que existiu no Redis e depois expirou → 400 igual a token inválido."""
+        user = await make_user(email=_EMAIL, password=_OLD_PASSWORD)
+        token = await _create_reset_token(str(user.id))
+
+        # Simula expiração do TTL deletando a chave do Redis
+        await get_redis().delete(_reset_token_key(token))
+
+        r = await client.post("/auth/reset-password", json={
+            "token": token, "new_password": _NEW_PASSWORD,
         })
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "INVALID_RESET_TOKEN"

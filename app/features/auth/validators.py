@@ -105,6 +105,13 @@ COMMON_PASSWORDS = frozenset({
 })
 
 
+_NORM_RE = re.compile(r"[^a-z0-9]")
+
+
+def _is_common(password: str) -> bool:
+    return _NORM_RE.sub("", password.lower()) in COMMON_PASSWORDS
+
+
 def _is_sequential(password: str, min_seq: int = 4) -> bool:
     lower = password.lower()
     for i in range(len(lower) - min_seq + 1):
@@ -158,7 +165,7 @@ def validate_password(password: str, context: list[str] | None = None) -> None:
     if not any(not c.isalnum() for c in password):
         raise ValueError("Senha deve ter pelo menos um caractere especial")
 
-    if password.lower() in COMMON_PASSWORDS:
+    if _is_common(password):
         raise ValueError("Senha muito comum")
 
     if _is_sequential(password):

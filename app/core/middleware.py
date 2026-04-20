@@ -1,5 +1,4 @@
 import logging
-import re
 from urllib.parse import urlparse
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
@@ -14,6 +13,7 @@ from app.core.request_id import (
     set_request_id,
 )
 from app.core.security import (
+    _stable_ua,
     clear_session_cookies,
     delete_session,
     get_session,
@@ -28,7 +28,6 @@ from app.core.security import (
 logger = logging.getLogger(__name__)
 
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-_UA_VERSIONS = re.compile(r"\d+\.\d+[\d.]*")
 
 
 # ---------------------------------------------------------------------------
@@ -55,18 +54,6 @@ def get_client_ip(request: Request) -> str:
         return real_ip
 
     return peer_ip
-
-
-def _stable_ua(ua: str) -> str:
-    """Strip version numbers from UA for resilient session binding.
-
-    NOTA DE SEGURANÇA: UA binding NÃO é defesa séria — qualquer atacante forja
-    User-Agent trivialmente. Este check só protege contra vetores triviais
-    (ex: extensão maliciosa que rouba cookie mas mantém UA default do Chrome).
-    Para detecção real de session hijacking, considerar fingerprint composto
-    (IP+UA+Accept-Language) com tolerância, ou histórico de devices + notificação
-    ao usuário em login novo."""
-    return _UA_VERSIONS.sub("*", ua)
 
 
 def _check_origin(request: Request) -> JSONResponse | None:

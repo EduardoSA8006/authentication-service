@@ -1,28 +1,13 @@
+import hashlib
 import logging
 
 from app.core.captcha import verify_captcha
 from app.core.config import settings
 from app.core.exceptions import RateLimitedError, ServiceUnavailableError
-from app.core.rate_limit import sliding_window_incr
 from app.core.redis import get_redis
 from app.features.auth.exceptions import CaptchaInvalidError, SuspiciousActivityError
 
 logger = logging.getLogger(__name__)
-
-
-async def check_rate_limit(scope: str, key: str, limit: int, window: int) -> None:
-    """Per-endpoint rate limit via sliding window.
-    Raises RateLimitedError se excedido, ServiceUnavailableError se Redis down."""
-    try:
-        redis_key = f"rl:{scope}:{key}"
-        count, retry_after = await sliding_window_incr(redis_key, limit, window)
-        if count > limit:
-            raise RateLimitedError(headers={"Retry-After": str(retry_after)})
-    except RateLimitedError:
-        raise
-    except Exception:
-        logger.warning("Rate limit unavailable for %s, rejecting request", scope)
-        raise ServiceUnavailableError
 
 
 # Per-endpoint limits: (max_requests, window_seconds)
@@ -63,15 +48,19 @@ _LOCKOUT_GLOBAL_THRESHOLD = 50
 _LOCKOUT_GLOBAL_WINDOW = 1800  # 30 minutes
 
 
+def _email_key(email: str) -> str:
+    return hashlib.sha256(email.encode()).hexdigest()[:32]
+
+
 def _lockout_key(email: str, ip: str) -> str:
-    return f"login_failures:{email}:{ip}"
+    return f"login_failures:{_email_key(email)}:{ip}"
 
 
 def _lockout_global_key(email: str) -> str:
     """Contador global por email — soma falhas de TODOS os IPs.
     Não é limpo em sucesso (evita atacante usar credential roubada pra
     resetar o counter e continuar); expira só pela TTL natural."""
-    return f"login_failures_global:{email}"
+    return f"login_failures_global:{_email_key(email)}"
 
 
 async def check_login_lockout(

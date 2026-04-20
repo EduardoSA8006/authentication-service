@@ -1,4 +1,5 @@
 """Integration tests pra GET /auth/me."""
+from datetime import UTC, datetime
 
 
 
@@ -22,3 +23,17 @@ class TestMe:
         body = r.json()
         # Campos obrigatórios presentes
         assert set(body.keys()) >= {"id", "name", "email", "date_of_birth", "is_verified", "created_at"}
+
+    async def test_soft_deleted_user_with_active_session_returns_401(
+        self, logged_in_client, db,
+    ):
+        """Sessão ativa mas user.deleted_at setado → /me deve retornar 401.
+        Defesa em profundidade: _get_user_by_id filtra deleted_at IS NULL."""
+        user, client = logged_in_client
+
+        # Soft-delete direto no DB sem invalidar sessão — simula o pior caso
+        user.deleted_at = datetime.now(UTC)
+        await db.commit()
+
+        r = await client.get("/auth/me")
+        assert r.status_code == 401
