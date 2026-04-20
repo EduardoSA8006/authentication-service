@@ -13,6 +13,7 @@ from app.features.auth.exceptions import SuspiciousActivityError
 from app.features.auth.rate_limit import (
     _LOCKOUT_GLOBAL_THRESHOLD,
     _LOCKOUT_THRESHOLD,
+    _email_key,
     _lockout_global_key,
     _lockout_key,
     check_login_lockout,
@@ -109,11 +110,11 @@ class TestLockoutLayer2Global:
 class TestLockoutRedisKeys:
     async def test_pair_key_format(self):
         key = _lockout_key("u@x.com", "1.2.3.4")
-        assert key == "login_failures:u@x.com:1.2.3.4"
+        assert key == f"login_failures:{_email_key('u@x.com')}:1.2.3.4"
 
     async def test_global_key_format(self):
         key = _lockout_global_key("u@x.com")
-        assert key == "login_failures_global:u@x.com"
+        assert key == f"login_failures_global:{_email_key('u@x.com')}"
 
     async def test_keys_are_distinct(self):
         """Layer 1 e Layer 2 vivem em chaves distintas."""

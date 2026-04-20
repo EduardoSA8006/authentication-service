@@ -109,7 +109,8 @@ _NORM_RE = re.compile(r"[^a-z0-9]")
 
 
 def _is_common(password: str) -> bool:
-    return _NORM_RE.sub("", password.lower()) in COMMON_PASSWORDS
+    lower = password.lower()
+    return lower in COMMON_PASSWORDS or _NORM_RE.sub("", lower) in COMMON_PASSWORDS
 
 
 def _is_sequential(password: str, min_seq: int = 4) -> bool:

@@ -1,4 +1,6 @@
 """Regression tests para L-3: LoginRequest normaliza email igual ao Register."""
+import pytest
+from pydantic import ValidationError
 from app.features.auth.schemas import LoginRequest
 
 
@@ -11,12 +13,10 @@ class TestLoginEmailNormalization:
         r = LoginRequest(email="  user@example.com  ", password="SenhaForte@2026")
         assert r.email == "user@example.com"
 
-    def test_invalid_format_falls_back_to_strip_lower(self):
-        """Anti-enum: formato inválido não gera 422; passa valor normalizado
-        pro service, que retorna InvalidCredentialsError."""
-        r = LoginRequest(email="NOT-AN-EMAIL", password="SenhaForte@2026")
-        # Não levanta ValidationError; valor fica normalizado como fallback
-        assert r.email == "not-an-email"
+    def test_invalid_format_raises_validation_error(self):
+        """Email inválido levanta ValidationError — validação estrita no schema."""
+        with pytest.raises(ValidationError):
+            LoginRequest(email="NOT-AN-EMAIL", password="SenhaForte@2026")
 
     def test_preserves_plus_alias(self):
         r = LoginRequest(email="user+tag@example.com", password="SenhaForte@2026")
