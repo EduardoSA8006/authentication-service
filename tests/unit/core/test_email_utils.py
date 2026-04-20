@@ -1,7 +1,8 @@
 """Unit tests para helpers de email e SMTP injection guard."""
 import pytest
 
-from app.core.email import _hash_email, send_email
+from app.core.email import send_email
+from app.core.security import hash_email as _hash_email
 
 
 class TestHashEmail:
