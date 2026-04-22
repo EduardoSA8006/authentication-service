@@ -23,7 +23,7 @@ class TestLoginBreachCheck:
         user = await make_user(**_CREDS)
         assert user.password_breach_detected_at is None
 
-        with patch("app.features.auth.service.is_password_breached", return_value=True):
+        with patch("app.features.auth.service.is_sha1_breached", return_value=True):
             r = await client.post("/auth/login", json=_CREDS)
             assert r.status_code == 200
             await wait_for_workers()
@@ -42,7 +42,7 @@ class TestLoginBreachCheck:
         """HIBP retorna False → flag permanece None + nenhum email."""
         await make_user(**_CREDS)
 
-        with patch("app.features.auth.service.is_password_breached", return_value=False):
+        with patch("app.features.auth.service.is_sha1_breached", return_value=False):
             r = await client.post("/auth/login", json=_CREDS)
             assert r.status_code == 200
             await wait_for_workers()
@@ -64,7 +64,7 @@ class TestLoginBreachCheck:
             **_CREDS, password_breach_detected_at=datetime(2026, 1, 1, tzinfo=UTC),
         )
 
-        hibp_mock = patch("app.features.auth.service.is_password_breached")
+        hibp_mock = patch("app.features.auth.service.is_sha1_breached")
         with hibp_mock as mocked:
             r = await client.post("/auth/login", json=_CREDS)
             assert r.status_code == 200
@@ -95,7 +95,7 @@ class TestLoginBreachCheck:
         """User sem flag → password_advisory é None."""
         await make_user(**_CREDS)
 
-        with patch("app.features.auth.service.is_password_breached", return_value=False):
+        with patch("app.features.auth.service.is_sha1_breached", return_value=False):
             r = await client.post("/auth/login", json=_CREDS)
             await wait_for_workers()
 
@@ -125,7 +125,7 @@ class TestLoginBreachCheck:
 
         await make_user(**_CREDS)
 
-        with patch("app.features.auth.service.is_password_breached", return_value=True):
+        with patch("app.features.auth.service.is_sha1_breached", return_value=True):
             r1, r2 = await asyncio.gather(
                 client.post("/auth/login", json=_CREDS),
                 client.post("/auth/login", json=_CREDS),
