@@ -58,7 +58,11 @@ jobs:
       REDIS_DB: 15
       SMTP_HOST: 127.0.0.1
       SMTP_PORT: 1025
-      SECRET_KEY: test-secret-key-fixed-for-reproducibility-minimum-32-chars-xxx
+      # Chave fixa para reprodutibilidade do CI, injetada via GitHub Secrets
+      # (nunca comitada). Usada em hash_email, CSRF HMAC e derivação da
+      # session-key — se vazada, permite forja de hash_email e bypass de CSRF
+      # em qualquer ambiente que reuse o mesmo valor.
+      SECRET_KEY: ${{ secrets.TEST_SECRET_KEY }}
       ALLOWED_HOSTS: '["localhost","127.0.0.1","test","testserver"]'
       ALLOWED_ORIGINS: '["http://localhost:3000","http://test"]'
       FRONTEND_URL: http://localhost:3000
@@ -72,22 +76,25 @@ jobs:
       HIBP_ENABLED: "false"
 
     steps:
-      - uses: actions/checkout@v4
+      # Actions pinadas por SHA full-length (supply-chain: tag pode ser re-apontada
+      # pelo maintainer ou atacante com push force; SHA é imutável). Dependabot
+      # atualiza o SHA semanalmente via PR — ver .github/dependabot.yml.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
 
       - name: Install Poetry
-        uses: snok/install-poetry@v1
+        uses: snok/install-poetry@76e04a911780d5b312d89783f7b1cd627778900a  # v1.4.1
         with:
           version: 2.3.4
           virtualenvs-in-project: true
 
       - name: Cache virtualenv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py312-${{ hashFiles('poetry.lock') }}
@@ -99,6 +106,9 @@ jobs:
       - name: Ruff
         run: poetry run ruff check .
 
+      - name: Mypy (static type check)
+        run: poetry run mypy app/
+
       - name: Run migrations
         run: poetry run alembic upgrade head
 
@@ -107,33 +117,36 @@ jobs:
 
       - name: Upload coverage artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: coverage-xml
           path: coverage.xml
           retention-days: 7
 
   security:
+    # needs: test — security job só roda se test passou. Evita PR ficar "verde"
+    # em security com testes quebrados.
+    needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
 
       - name: Setup Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
         with:
           python-version: "3.12"
 
       - name: Install Poetry
-        uses: snok/install-poetry@v1
+        uses: snok/install-poetry@76e04a911780d5b312d89783f7b1cd627778900a  # v1.4.1
         with:
           version: 2.3.4
           virtualenvs-in-project: true
 
       - name: Cache virtualenv
         id: cache-venv
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830  # v4
         with:
           path: .venv
           key: venv-${{ runner.os }}-py312-${{ hashFiles('poetry.lock') }}
@@ -151,7 +164,7 @@ jobs:
         run: poetry run bandit -r app/ -ll -ii
 
       - name: Trivy filesystem scan (CVEs + secrets + misconfig)
-        uses: aquasecurity/trivy-action@0.35.0
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1  # 0.35.0
         with:
           scan-type: fs
           scan-ref: .
@@ -160,6 +173,6 @@ jobs:
           ignore-unfixed: true
 
       - name: Gitleaks (secrets commitados)
-        uses: gitleaks/gitleaks-action@v2
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7  # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

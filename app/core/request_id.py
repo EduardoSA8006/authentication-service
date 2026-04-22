@@ -30,10 +30,15 @@ def set_request_id(value: str) -> None:
     _request_id_var.set(value)
 
 
+_HEX_CHARS = frozenset("0123456789abcdef")
+
+
 def sanitize_request_id(value: str) -> str:
-    """Aceita X-Request-ID do cliente mas sanitiza — truncate + remove não-hex.
-    Evita log injection (CRLF) e IDs absurdamente longos."""
-    cleaned = "".join(c for c in value if c.isalnum() or c in "-_")[:_MAX_LEN]
+    """Aceita X-Request-ID do cliente mas sanitiza para formato interno
+    (hex-only, igual ao new_request_id via uuid4().hex). Caracteres não-hex
+    são descartados — evita log injection (CRLF) e mantém formato único
+    entre IDs gerados internamente e IDs ecoados do cliente."""
+    cleaned = "".join(c for c in value.lower() if c in _HEX_CHARS)[:_MAX_LEN]
     return cleaned or new_request_id()
 
 

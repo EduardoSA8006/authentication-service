@@ -72,7 +72,16 @@ async def unhandled_error_handler(_request: Request, exc: Exception) -> JSONResp
 # ---------------------------------------------------------------------------
 
 def register_error_handlers(app: FastAPI) -> None:
-    app.add_exception_handler(AppError, app_error_handler)
-    app.add_exception_handler(RequestValidationError, validation_error_handler)
-    app.add_exception_handler(StarletteHTTPException, http_error_handler)
+    # Starlette tipa add_exception_handler esperando Callable[Exception] — mas
+    # o Python protocol é covariante nos args: um handler que aceita AppError
+    # (subclasse de Exception) é sempre invocado com uma Exception concreta
+    # em runtime. mypy não aceita a variância nesse contexto; type: ignore
+    # localizado é a solução oficial recomendada (ver Starlette #1108).
+    app.add_exception_handler(AppError, app_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(
+        RequestValidationError, validation_error_handler,  # type: ignore[arg-type]
+    )
+    app.add_exception_handler(
+        StarletteHTTPException, http_error_handler,  # type: ignore[arg-type]
+    )
     app.add_exception_handler(Exception, unhandled_error_handler)

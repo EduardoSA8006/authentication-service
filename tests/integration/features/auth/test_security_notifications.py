@@ -75,6 +75,57 @@ class TestNewDeviceLoginNotification:
         msgs = await mailhog.wait_for(count=1)
         assert _count_with_needles(msgs, ["Novo dispositivo"]) == 1
 
+    async def test_ip_change_worker_sends_notification(
+        self, make_user, mailhog, client,
+    ):
+        """Mudança de /24 IPv4 dispara notificação via worker (reutiliza
+        o template 'Novo dispositivo' — vítima de cookie theft vê o email).
+        Fixture `client` é necessário pra patch de _session_scope."""
+        from app.features.auth.service import _ip_change_notification_worker
+
+        user = await make_user(email=_EMAIL, password=_PASSWORD)
+        await _ip_change_notification_worker(
+            str(user.id), "203.0.113.42", "Mozilla/5.0 Chrome/131.0",
+        )
+
+        msgs = await mailhog.wait_for(count=1)
+        assert _count_with_needles(msgs, ["Novo dispositivo"]) == 1
+
+    async def test_ip_change_worker_dedups_by_subnet(
+        self, make_user, mailhog, client,
+    ):
+        """Dedup cross-session: 2 chamadas ao worker pro mesmo /24 → 1 email."""
+        from app.features.auth.service import _ip_change_notification_worker
+
+        user = await make_user(email=_EMAIL, password=_PASSWORD)
+        # Mesmo /24 (198.51.100.x)
+        await _ip_change_notification_worker(
+            str(user.id), "198.51.100.10", "Mozilla/5.0 Chrome/131.0",
+        )
+        await _ip_change_notification_worker(
+            str(user.id), "198.51.100.99", "Mozilla/5.0 Chrome/131.0",
+        )
+
+        msgs = await mailhog.wait_for(count=1)
+        assert _count_with_needles(msgs, ["Novo dispositivo"]) == 1
+
+    async def test_ip_change_worker_skips_invalid_ip(
+        self, make_user, mailhog, client,
+    ):
+        """IP sentinel ("invalid"/"unknown") → sem email (não dá pra comparar)."""
+        from app.features.auth.service import _ip_change_notification_worker
+
+        user = await make_user(email=_EMAIL, password=_PASSWORD)
+        await _ip_change_notification_worker(
+            str(user.id), "invalid", "Mozilla/5.0",
+        )
+        await _ip_change_notification_worker(
+            str(user.id), "unknown", "Mozilla/5.0",
+        )
+
+        msgs = await mailhog.get_messages()
+        assert _count_with_needles(msgs, ["Novo dispositivo"]) == 0
+
     async def test_same_device_second_login_no_notification(
         self, client, make_user, mailhog, wait_for_workers,
     ):
@@ -115,11 +166,12 @@ class TestPasswordChangedNotification:
     async def test_failed_reset_does_not_notify(
         self, client, make_user, mailhog, wait_for_workers,
     ):
-        """Reset com token inválido → 400, nenhum email de senha alterada."""
+        """Reset com token inválido (length válido mas não registrado)
+        → 400, nenhum email de senha alterada."""
         await make_user(email=_EMAIL, password=_PASSWORD)
 
         r = await client.post("/auth/reset-password", json={
-            "token": "bad-token", "new_password": "NovaSenhaForte@2027",
+            "token": "a" * 43, "new_password": "NovaSenhaForte@2027",
         })
         assert r.status_code == 400
         await wait_for_workers()

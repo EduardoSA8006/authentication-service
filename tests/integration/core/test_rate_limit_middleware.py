@@ -31,6 +31,25 @@ class TestRateLimitGlobal:
         assert r.status_code == 200
         assert r.json() == {"status": "ok"}
 
+    async def test_429_carries_cors_headers(self, client):
+        """Regression: RateLimit tem de rodar DENTRO do CORS middleware. Se
+        CORS não injetasse headers no 429, o browser bloquearia a response
+        como 'network error' e o frontend perderia Retry-After e o status."""
+        responses = []
+        for _ in range(101):
+            r = await client.get(
+                "/_rate_limit_target_cors",
+                headers={"Origin": "http://localhost:3000"},
+            )
+            responses.append(r)
+        blocked = [r for r in responses if r.status_code == 429]
+        assert blocked, "nenhum 429 recebido"
+        rate_limited = blocked[0]
+        assert rate_limited.headers.get("access-control-allow-origin") == (
+            "http://localhost:3000"
+        )
+        assert rate_limited.headers.get("retry-after")
+
     async def test_rate_limiter_not_invoked_for_health(self, client):
         """Structural: se o limiter explode, /health ainda passa. Prova que
         /health short-circuita antes do sliding_window_incr."""

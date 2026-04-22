@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import ipaddress
 import json
 import re
 import secrets
@@ -15,7 +16,7 @@ _TOKEN_BYTES = 36  # 36 bytes → exactly 48 chars in base64url
 _UA_VERSIONS = re.compile(r"\d+\.\d+[\d.]*")
 
 
-def _stable_ua(ua: str) -> str:
+def stable_ua(ua: str) -> str:
     """Strip version numbers from UA for resilient session binding.
 
     NOTA DE SEGURANÇA: UA binding NÃO é defesa séria — qualquer atacante forja
@@ -24,8 +25,31 @@ def _stable_ua(ua: str) -> str:
     return _UA_VERSIONS.sub("*", ua)
 
 
+def ip_subnet(value: str) -> str | None:
+    """Canonicaliza IP em subnet (IPv4 /24, IPv6 /48) para detecção de mudança
+    de rede sem ruído de DHCP/NAT churn dentro da mesma ISP/carrier.
+
+    /24 IPv4: mesma sub-rede residencial típica (~254 hosts).
+    /48 IPv6: mesma alocação de ISP para um cliente (RIPE/ARIN recomendam).
+
+    Retorna None para sentinels ("unknown", "invalid") e IPs não-parseáveis —
+    caller deve tratar None como "não dá pra comparar" (skip notificação)."""
+    try:
+        addr = ipaddress.ip_address(value)
+    except (ValueError, TypeError):
+        return None
+    prefix = 24 if isinstance(addr, ipaddress.IPv4Address) else 48
+    return str(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+
+
 def hash_email(email: str) -> str:
-    """HMAC-SHA256(SECRET_KEY, email)[:16] — correlaciona logs sem vazar PII."""
+    """HMAC-SHA256(SECRET_KEY, email)[:16] — correlaciona logs sem vazar PII.
+
+    Trade-off de tamanho: 16 hex chars = 64 bits. Colisão (birthday) em ~2^32
+    (≈4 bilhões) emails distintos hasheados. Aceitável pra produto novo; se
+    crescer além disso, aumentar pra 24/32 chars (96/128 bits) — migração
+    não quebra nada porque o hash é apenas correlation ID em logs, não
+    identificador de negócio."""
     return hmac.new(
         settings.SECRET_KEY.encode(),
         email.encode(),
@@ -35,6 +59,17 @@ def hash_email(email: str) -> str:
 # Lua script for atomic invalidation of all sessions for a user.
 # Reads the set, deletes every session key, then deletes the set itself.
 # This runs atomically inside Redis — no TOCTOU race.
+#
+# REDIS CLUSTER MIGRATION NOTE:
+# Hoje rodamos Redis standalone; EVAL pode tocar qualquer key. Ao migrar
+# pra Redis Cluster, o EVAL só pode acessar keys do MESMO hash slot. O set
+# user_sessions:{user_id} já fica num slot determinado pelo user_id dentro
+# das chaves; os members do set (session:{sha256(token)}) são hashados
+# separadamente e provavelmente caem em outros slots → EVAL falha com
+# CROSSSLOT error. Quando migrar, trocar _session_key para incluir hash-tag
+# com user_id: `session:{user_id}:{sha256(token)}` — o `{user_id}` entre
+# chaves força o mesmo slot do set, mantendo o EVAL atômico. Até lá, OK
+# com standalone.
 _LUA_DELETE_ALL = """
 local set_key = KEYS[1]
 local members = redis.call('SMEMBERS', set_key)
@@ -50,6 +85,13 @@ return #members
 # Se outra request rotacionou essa chave pra grace entre um e outro, o SET
 # não dispara — grace e seu TTL curto são preservados.
 #
+# Proteção adicional contra last-write-wins em last_active: duas requests
+# concorrentes da mesma sessão podem ambas entrar aqui com last_active
+# calculado em snapshots diferentes. Sem comparação, a que commitar por
+# último regride o timestamp — ponteiro de idle timeout envelhece, e
+# is_expired pode falsear negativo em edge case. Comparamos last_active
+# incoming vs stored e mantemos o max.
+#
 # Retorna 1 se touch ocorreu, 0 se foi no-op (key deleted, grace, ou JSON inválido).
 _LUA_TOUCH = """
 local current = redis.call('GET', KEYS[1])
@@ -63,7 +105,16 @@ end
 if parsed.grace then
     return 0
 end
-redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+local incoming_ok, incoming = pcall(cjson.decode, ARGV[1])
+if not incoming_ok then
+    return 0
+end
+local stored_la = parsed.last_active
+local incoming_la = incoming.last_active
+if stored_la and incoming_la and stored_la > incoming_la then
+    incoming.last_active = stored_la
+end
+redis.call('SET', KEYS[1], cjson.encode(incoming), 'EX', tonumber(ARGV[2]))
 return 1
 """
 
@@ -90,6 +141,15 @@ def _user_sessions_key(user_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def generate_csrf_token(session_token: str) -> str:
+    """HMAC-SHA256 determinístico: f(SECRET_KEY, session_token) → CSRF.
+    Determinístico é propriedade do design double-submit: cookie carrega
+    o token, header espelha; servidor verifica HMAC contra o session
+    correlacionado. Sem nonce porque o session_token em si é aleatório
+    (36 bytes urlsafe) → cada sessão tem um HMAC único.
+
+    Se SECRET_KEY vazar, atacante forja CSRF tokens arbitrários — mas
+    nessa altura já tem poder pra forjar session_tokens (mesma key deriva
+    ambos), então a compromissão é sistêmica, não só de CSRF."""
     return hmac.new(
         settings.SECRET_KEY.encode(),
         session_token.encode(),
@@ -108,18 +168,37 @@ def verify_csrf_token(session_token: str, csrf_token: str) -> bool:
 
 async def create_session(
     user_id: str,
-    request: Request,
+    request: Request | None = None,
     extra: dict | None = None,
+    *,
+    ip: str | None = None,
+    user_agent: str | None = None,
 ) -> str:
+    """`ip` e `user_agent` devem vir resolvidos pelo caller — o router já faz
+    XFF-walk via get_client_ip e tem acesso aos headers. O argumento `request`
+    é fallback de compat para callers legados/tests; em produção atrás de nginx
+    o fallback de ip grava 127.0.0.1 em toda sessão e quebra notificações."""
     token = generate_session_token()
     now = datetime.now(UTC).isoformat()
+    if ip:
+        resolved_ip = ip
+    elif request is not None and request.client:
+        resolved_ip = request.client.host
+    else:
+        resolved_ip = "unknown"
+    if user_agent is not None:
+        resolved_ua = user_agent
+    elif request is not None:
+        resolved_ua = request.headers.get("user-agent", "")
+    else:
+        resolved_ua = ""
     data = {
         "user_id": user_id,
         "created_at": now,
         "last_active": now,
         "rotated_at": now,
-        "ip": request.client.host if request.client else "unknown",
-        "user_agent": request.headers.get("user-agent", ""),
+        "ip": resolved_ip,
+        "user_agent": resolved_ua,
         **(extra or {}),
     }
     redis = get_redis()
@@ -141,6 +220,12 @@ async def get_session(token: str) -> dict | None:
 
 
 async def delete_session(token: str) -> None:
+    """Apaga sessão + tira referência do set de sessões do user.
+
+    Race benigna documentada: entre redis.get(key) e o pipe.srem, outra
+    request pode ter rotacionado a sessão, removendo essa key do set.
+    SREM em membro inexistente é no-op, logo sem bug real — só tem uma
+    round-trip perdida em cenário raro."""
     redis = get_redis()
     key = _session_key(token)
     raw = await redis.get(key)
@@ -301,6 +386,64 @@ async def delete_all_user_sessions(user_id: str) -> int:
     return int(result)
 
 
+_SESSION_ID_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def session_id_from_token(token: str) -> str:
+    """ID público opaco (64 chars hex) para uma sessão. É o hash SHA256 do
+    token — não é revertível pro token, mas é único por sessão e estável.
+    Cliente pode usar como identificador em listagens/revogações sem jamais
+    ver o token bruto."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+def is_valid_session_id(value: str) -> bool:
+    """Valida formato (64 hex) antes de construir chave Redis — evita que
+    um path param arbitrário (ex: '../foo') vire `session:../foo` e toque
+    chaves fora do namespace de sessões."""
+    return bool(_SESSION_ID_RE.match(value))
+
+
+def _session_key_from_id(session_id: str) -> str:
+    """Chave Redis a partir do ID público (já é o hash — evita re-hash)."""
+    return f"session:{session_id}"
+
+
+async def get_session_by_id(session_id: str) -> dict | None:
+    """Fetch por ID público (sem conhecer o token bruto). Usado por endpoints
+    de gestão de sessão (list/revoke)."""
+    redis = get_redis()
+    raw = await redis.get(_session_key_from_id(session_id))
+    if raw is None:
+        return None
+    return json.loads(raw)
+
+
+async def delete_session_by_id(user_id: str, session_id: str) -> bool:
+    """Revoga uma sessão por ID público. Enforcement de ownership: verifica
+    `user_id` da sessão alvo == caller antes de deletar — usuário não pode
+    revogar sessão alheia mesmo sabendo o session_id (ataque: session_id
+    vazado via logs/CSV export).
+
+    Retorna True se revogou, False se sessão inexistente ou não pertence ao
+    user (indistinguíveis — evita side-channel de existência de sessão).
+    Esta unificação é feita no service/router, não aqui — aqui só retorna
+    bool preciso pra quem precisa auditar."""
+    redis = get_redis()
+    key = _session_key_from_id(session_id)
+    raw = await redis.get(key)
+    if raw is None:
+        return False
+    session = json.loads(raw)
+    if session.get("user_id") != user_id:
+        return False
+    pipe = redis.pipeline()
+    pipe.delete(key)
+    pipe.srem(_user_sessions_key(user_id), key)
+    await pipe.execute()
+    return True
+
+
 async def list_user_sessions(user_id: str) -> list[dict]:
     redis = get_redis()
     set_key = _user_sessions_key(user_id)
@@ -317,7 +460,20 @@ async def list_user_sessions(user_id: str) -> list[dict]:
     stale: list[str] = []
     for sk, raw in zip(session_keys, results, strict=False):
         if raw:
-            sessions.append(json.loads(raw))
+            session = json.loads(raw)
+            # Sessões em grace estão expirando em ≤60s (TOKEN_ROTATION_GRACE)
+            # e não renovam. Expô-las na UI como "ativas" é enganoso: o
+            # dispositivo real já migrou para a nova token; a grace só existe
+            # para cobrir requests em voo pós-rotação. Usuário clicando em
+            # "revogar" revogaria um fantasma.
+            if session.get("grace"):
+                continue
+            # Injeta o session_id (hash SHA256 do token) extraído da chave
+            # Redis. Formato da chave: "session:{hash}". Cliente nunca vê
+            # o token bruto — só o ID opaco.
+            key_str = sk if isinstance(sk, str) else sk.decode()
+            session["session_id"] = key_str.removeprefix("session:")
+            sessions.append(session)
         else:
             stale.append(sk)
 
@@ -331,7 +487,24 @@ async def list_user_sessions(user_id: str) -> list[dict]:
 # Cookie helpers
 # ---------------------------------------------------------------------------
 
-def set_session_cookies(response: Response, session_token: str) -> None:
+def set_session_cookies(
+    response: Response, session_token: str, *, max_age: int | None = None,
+) -> None:
+    """`max_age` em segundos. Na rotação, o caller deve passar o TTL
+    remanescente da sessão (SESSION_TTL − age), senão cada rotação renova o
+    cookie para 7 dias e quebra o contrato de "expiração absoluta" — sessão
+    ativa viveria indefinidamente enquanto o usuário continuar usando.
+
+    HARDENING OPCIONAL (não aplicado):
+    - `Priority=High` (Chrome-only, RFC draft): prioriza cookie em eviction
+      quando browser atinge limite por domínio. Só relevante se o domínio
+      tem 180+ cookies — improvável pra serviço de auth.
+    - `Partitioned` (CHIPS): cookies particionados por top-level site,
+      defesa contra cross-site tracking. Útil só se o cookie é enviado
+      em contexto third-party (<iframe> embedado). Este é serviço
+      first-party (frontend bate direto no API) → não aplica.
+    Ambos ficam como hardening futuro se o cenário mudar."""
+    ttl = max_age if max_age is not None else settings.SESSION_TTL
     # Session cookie: strict SameSite, HTTP-only
     response.set_cookie(
         key=settings.session_cookie,
@@ -341,7 +514,7 @@ def set_session_cookies(response: Response, session_token: str) -> None:
         samesite="strict",
         domain=settings.COOKIE_DOMAIN,
         path=settings.COOKIE_PATH,
-        max_age=settings.SESSION_TTL,
+        max_age=ttl,
     )
     # CSRF cookie: lax SameSite, readable by JS
     response.set_cookie(
@@ -352,7 +525,7 @@ def set_session_cookies(response: Response, session_token: str) -> None:
         samesite="lax",
         domain=settings.COOKIE_DOMAIN,
         path=settings.COOKIE_PATH,
-        max_age=settings.SESSION_TTL,
+        max_age=ttl,
     )
 
 

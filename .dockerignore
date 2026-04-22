@@ -1,8 +1,40 @@
+# Python
 __pycache__
 *.pyc
-.git
-.gitignore
-.env
-.venv
+*.pyo
+*.pyd
+.Python
+*.egg-info
 .mypy_cache
 .ruff_cache
+.pytest_cache
+
+# VCS / CI / tooling
+.git
+.gitignore
+.github
+.dockerignore
+.editorconfig
+
+# Local env / venv
+.env
+.env.*
+.venv
+venv
+
+# Testes / docs / coverage — não fazem parte da imagem de runtime
+tests
+docs
+*.md
+coverage.xml
+.coverage
+htmlcov
+
+# Artefatos locais do host
+*.sqlite
+*.log
+
+# IDE
+.vscode
+.idea
+*.swp

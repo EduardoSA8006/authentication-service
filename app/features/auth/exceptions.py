@@ -1,6 +1,7 @@
 from app.core.exceptions import (
     BadRequestError,
     ForbiddenError,
+    NotFoundError,
     RateLimitedError,
     UnauthorizedError,
 )
@@ -24,11 +25,6 @@ class EmailNotVerifiedError(ForbiddenError):
 class InvalidVerificationTokenError(BadRequestError):
     code = "INVALID_VERIFICATION_TOKEN"
     message = "Token de verificação inválido ou expirado"
-
-
-class AccountDeletedError(UnauthorizedError):
-    code = "ACCOUNT_DELETED"
-    message = "Credenciais inválidas"
 
 
 class PasswordBreachedError(BadRequestError):
@@ -63,3 +59,17 @@ class CaptchaInvalidError(BadRequestError):
     malformado, hostname errado). Frontend deve obter token fresco do widget."""
     code = "CAPTCHA_INVALID"
     message = "Verificação CAPTCHA inválida — gere um novo token"
+
+
+class SessionNotFoundError(NotFoundError):
+    """Session alvo não existe OU não pertence ao caller. Unificamos os dois
+    casos no mesmo 404 — expor 403 ("não é sua") vs 404 ("não existe") criaria
+    oráculo pra enumerar session_ids de outros usuários."""
+    code = "SESSION_NOT_FOUND"
+    message = "Sessão não encontrada"
+
+
+class InvalidSessionIdError(BadRequestError):
+    """session_id no path não passou no formato esperado (64 hex chars)."""
+    code = "INVALID_SESSION_ID"
+    message = "session_id inválido"

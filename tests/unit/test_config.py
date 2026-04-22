@@ -74,9 +74,35 @@ class TestProductionValidator:
             assert any("SMTP_HOST is 'mailhog'" in w for w in warnings)
 
     def test_smtp_tls_off_warns(self):
-        with patch.object(settings, "SMTP_TLS", False):
+        """Ambos TLS flags off → email em plaintext, warning emitido."""
+        with patch.object(settings, "SMTP_TLS", False), \
+                patch.object(settings, "SMTP_IMPLICIT_TLS", False):
             warnings = validate_settings_for_production()
-            assert any("SMTP_TLS is False" in w for w in warnings)
+            assert any(
+                "both False" in w and "plaintext" in w for w in warnings
+            )
+
+    def test_smtp_both_tls_flags_warns(self):
+        """STARTTLS + SMTPS implícito ao mesmo tempo é config inválida."""
+        with patch.object(settings, "SMTP_TLS", True), \
+                patch.object(settings, "SMTP_IMPLICIT_TLS", True):
+            warnings = validate_settings_for_production()
+            assert any("both True" in w for w in warnings)
+
+    def test_smtp_implicit_tls_only_no_warn(self):
+        """SMTPS implícito (465) só — config válida, sem warning."""
+        with patch.object(settings, "SMTP_TLS", False), \
+                patch.object(settings, "SMTP_IMPLICIT_TLS", True):
+            warnings = validate_settings_for_production()
+            assert not any("plaintext" in w for w in warnings)
+            assert not any("both True" in w for w in warnings)
+
+    def test_empty_allowed_hosts_warns(self):
+        """ALLOWED_HOSTS=[] é fail-closed, mas misconfig — warning pra detectar
+        antes de staging ficar 'sem responder nada'."""
+        with patch.object(settings, "ALLOWED_HOSTS", []):
+            warnings = validate_settings_for_production()
+            assert any("ALLOWED_HOSTS is empty" in w for w in warnings)
 
     def test_no_postgres_ssl_warns(self):
         with patch.object(settings, "POSTGRES_SSL", False):
@@ -87,3 +113,21 @@ class TestProductionValidator:
         with patch.object(settings, "REDIS_TLS", False):
             warnings = validate_settings_for_production()
             assert any("REDIS_TLS is False" in w for w in warnings)
+
+    def test_database_url_sync_uses_verify_full_without_custom_ca(self):
+        """SSL sem CA custom deve usar verify-full (system CA bundle), não
+        verify-ca — senão hostname não é validado e MitM é possível com
+        qualquer cert emitido por uma CA do bundle."""
+        with patch.object(settings, "POSTGRES_SSL", True), \
+                patch.object(settings, "POSTGRES_CA_CERT", ""):
+            url = settings.database_url_sync
+            assert "sslmode=verify-full" in url
+            assert "sslmode=verify-ca" not in url
+
+    def test_database_url_sync_uses_verify_full_with_custom_ca(self):
+        """CA custom pinning: verify-full + sslrootcert."""
+        with patch.object(settings, "POSTGRES_SSL", True), \
+                patch.object(settings, "POSTGRES_CA_CERT", "/etc/ssl/ca.pem"):
+            url = settings.database_url_sync
+            assert "sslmode=verify-full" in url
+            assert "sslrootcert=/etc/ssl/ca.pem" in url

@@ -154,7 +154,7 @@ Request → TrustedHost → SecurityHeaders → RateLimit → CORS → SizeLimit
 |---|---|
 | **TrustedHost** | Rejeita requests com `Host` fora de `ALLOWED_HOSTS` |
 | **SecurityHeaders** | `X-Content-Type-Options`, `X-Frame-Options`, `CSP`, `HSTS`, etc. |
-| **RateLimit** | 100 req/min por IP via Redis (fail-open se Redis cair) |
+| **RateLimit** | 100 req/min por IP via Redis (fail-closed: 503 se Redis cair, evita bypass via DoS) |
 | **CORS** | Restrito a `ALLOWED_ORIGINS`, credentials habilitado |
 | **SizeLimit** | Rejeita body >10MB (raw ASGI, verifica bytes reais, nao so Content-Length) |
 | **Session** | Valida/rotaciona sessao, atualiza last_active, binding de UA |
@@ -318,6 +318,19 @@ docker compose -f docker-compose.prod.yml exec api alembic upgrade head
 
 Todos os servicos ficam em `127.0.0.1` — nada exposto para a rede. O frontend na mesma VPS acessa o backend via localhost. Apenas o frontend (nginx) deve ter porta aberta.
 
+### Invariantes operacionais
+
+Coisas que o código assume e quebram silenciosamente se violadas em produção:
+
+- **`TRUSTED_PROXY_IPS` precisa conter o IP do proxy como visto do container**, não `127.0.0.1`. Se o API roda em um container e o nginx/sidecar em outro (rede overlay Docker, ex.: `172.18.0.0/16`), o peer recebido pelo ASGI é o IP do proxy no overlay — `127.0.0.1` nessa lista faz `get_client_ip` ignorar `X-Forwarded-For` e usar o IP do proxy. Rate-limit, lockout e logs passam a indexar por proxy, não pelo cliente real. Validar pós-deploy com uma request externa + `docker logs api` confirmando que o IP logado é o do cliente, não o do nginx.
+- **Session cookie é `SameSite=Strict` por design.** Links em email (verify-email, reset-password) que abrem o frontend cold-start não carregam o cookie de sessão; os endpoints desses fluxos não exigem sessão, então funciona. Se um futuro flow autenticado for disparado por clique-em-email no cold-start, ele precisa ser redesenhado (rota intermediária que pede login novamente ou troca para `Lax` — NÃO trocar sem revisitar o modelo de ameaça do CSRF).
+- **Troca de `COOKIE_DOMAIN` em produção requer janela de migração.** Alterar `null → .example.com` (ou vice-versa) faz o `delete_cookie` novo não apagar cookies emitidos sob a config antiga — browser fica com sessão fantasma até o TTL expirar (até 7 dias). Mitigação: durante a janela, emitir `delete_cookie` nas duas configs, ou renomear o cookie (`SESSION_COOKIE_NAME`) pra forçar re-login global.
+- **Session cookie não usa `Partitioned` (CHIPS).** O serviço é first-party (frontend bate direto no API); cookies third-party em contexto `<iframe>` embedado por parceiro nem sequer chegariam com `SameSite=Strict`. Se o produto vier a embedar o frontend em iframe de partner, revisar os dois flags em conjunto (`Partitioned` + relaxar `SameSite` para `None`) — decisão conjunta, não isolada.
+- **Política de senha NÃO segue NIST SP 800-63B §5.1.1.2.** `validate_password` exige complexidade (upper + digit + special) além de length/HIBP/common/sequential/contextual. NIST desencoraja composition rules porque empurram usuários para `Password1!` (passa rules, é fraco). Mantido por decisão de produto atual (cobre requisitos de auditoria que ainda citam SP 800-63A antigo). Ao relaxar, manter o mínimo de 10 chars + HIBP/common/contextual — a checagem de breach é o filtro que agrega valor real.
+- **`/readyz` não pode ser exposto publicamente.** É exempt de rate-limit (LB probes não podem receber 429, senão o serviço vira unhealthy sob carga) e faz `ping` no Redis + `SELECT 1` no Postgres a cada request. Atacante spammando `/readyz` gera load real nas dependências. Expor só em rede interna do LB/ingress; `/livez` (sem check de deps) pode ser externo se necessário.
+- **CSRF cookie é `HttpOnly=false` (double-submit requer leitura via JS).** Se o frontend sofrer XSS, atacante lê `csrf_token` e forja requests state-changing autenticados. Mitigação depende de CSP restritivo NO FRONTEND (não neste backend — o CSP daqui só protege responses deste serviço, que são JSON). O frontend deve declarar `default-src 'self'; script-src 'self'` no mínimo, sem `'unsafe-inline'`/`'unsafe-eval'`. Sem isso, o modelo de CSRF cai para "best-effort" em caso de XSS do FE.
+- **CAPTCHA é enviado via header `X-Captcha-Token`, não no body.** Habilitado no CORS `allow_headers`. Frontend obtém token do Cloudflare Turnstile (`cf-turnstile-response` no widget) e envia como `X-Captcha-Token` no login — o backend não espera o nome nativo do provider. Documentação de integração precisa refletir isso.
+
 ## Integracao com frontend
 
 O frontend precisa:
@@ -400,6 +413,15 @@ poetry run ruff check .
 poetry run mypy app/
 poetry run pytest
 ```
+
+Hook local de secrets (evita vazar `.env` via `git add -A`):
+
+```bash
+pipx install pre-commit
+pre-commit install
+```
+
+O hook roda gitleaks em cada commit. O mesmo scan tambem roda em CI, mas so detecta apos push — o hook local impede que o secret saia da maquina.
 
 ## Licenca
 

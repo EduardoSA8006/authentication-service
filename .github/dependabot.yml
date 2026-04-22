@@ -1,0 +1,31 @@
+version: 2
+updates:
+  # github-actions: Dependabot pina SHAs full-length e atualiza com PRs
+  # versionados. Mitiga supply-chain de tags mutáveis (ex: gitleaks-action@v2,
+  # snok/install-poetry@v1) — uma vez aceito o primeiro PR, toda action fica
+  # em SHA imutável com comentário de versão. Atualizações sobem em PR
+  # separado, revisáveis antes do merge.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Imagem base do Dockerfile (digest pinado via @sha256:). Dependabot
+  # atualiza o digest semanalmente.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Dependências Python (poetry.lock). Grupo separado para dev dependencies
+  # pra não poluir o histórico de prod com bumps de pytest/ruff.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+    groups:
+      dev-dependencies:
+        dependency-type: development

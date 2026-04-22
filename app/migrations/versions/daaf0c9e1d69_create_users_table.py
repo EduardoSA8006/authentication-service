@@ -31,5 +31,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_users_email")
+    # table_name= é obrigatório em MySQL/SQL Server (Postgres infere do
+    # catálogo, mas outros dialetos não). Portabilidade entre dialetos.
+    op.drop_index("ix_users_email", table_name="users")
     op.drop_table("users")

@@ -33,6 +33,22 @@ class TestForgotPassword:
         msgs = await mailhog.get_messages()
         assert len(msgs) == 0
 
+    async def test_unverified_user_gets_no_email(
+        self, client, make_user, mailhog, wait_for_workers,
+    ):
+        """Porta lateral: conta não verificada não deve receber reset-email —
+        a prova de posse do inbox tem de passar pelo fluxo dedicado de
+        verify-email (TTL 24h + HMAC-SHA256), não pelo reset (TTL 1h)."""
+        await make_user(email="unverified@test.com", verified=False)
+        r = await client.post(
+            "/auth/forgot-password", json={"email": "unverified@test.com"},
+        )
+        assert r.status_code == 202  # mesma resposta, anti-enum
+        await wait_for_workers()
+
+        msgs = await mailhog.get_messages()
+        assert len(msgs) == 0
+
     async def test_soft_deleted_user_gets_no_email(
         self, client, make_user, db, mailhog, wait_for_workers,
     ):
@@ -57,13 +73,15 @@ class TestForgotPassword:
         msgs = await mailhog.get_messages()
         assert len(msgs) == 0
 
-    async def test_malformed_email_does_not_422(
+    async def test_malformed_email_returns_422(
         self, client, wait_for_workers,
     ):
-        """Anti-enum: email mal-formado deve chegar no worker (que silencia),
-        não ser rejeitado com 422 distinguível do caminho 202."""
+        """Schema-level: email mal-formado é 422 — leak aceitável (mesma
+        superfície do /register), trade-off pra não poluir keyspace Redis
+        com payloads arbitrários. Anti-enum continua valendo pra emails
+        bem-formados (existente vs não-existente vs soft-deleted → todos 202)."""
         r = await client.post("/auth/forgot-password", json={"email": "not-an-email"})
-        assert r.status_code == 202
+        assert r.status_code == 422
         await wait_for_workers()
 
     async def test_rate_limit_per_ip(self, client, wait_for_workers):

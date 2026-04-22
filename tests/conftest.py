@@ -23,6 +23,7 @@ from httpx import ASGITransport  # noqa: E402
 from sqlalchemy.ext.asyncio import AsyncSession  # noqa: E402
 
 from app.core.database import engine, get_db  # noqa: E402
+from app.core.http_client import close_http_client, init_http_client  # noqa: E402
 from app.core.redis import close_redis, get_redis, init_redis  # noqa: E402
 from app.features.auth import service as auth_service  # noqa: E402
 from app.features.auth.models import User  # noqa: E402
@@ -38,7 +39,9 @@ from tests.helpers.mailhog import MailHog  # noqa: E402
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def _services():
     await init_redis()
+    await init_http_client()
     yield
+    await close_http_client()
     await close_redis()
 
 

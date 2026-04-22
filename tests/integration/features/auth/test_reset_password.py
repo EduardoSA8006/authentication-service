@@ -44,8 +44,10 @@ class TestResetPassword:
         assert user.password_breach_detected_at is None  # flag limpo
 
     async def test_invalid_token_400(self, client):
+        # Token com length válido (>=32 chars, Pydantic guard) mas não
+        # registrado no Redis → INVALID_RESET_TOKEN no service, 400.
         r = await client.post("/auth/reset-password", json={
-            "token": "nonexistent-token", "new_password": _NEW_PASSWORD,
+            "token": "a" * 43, "new_password": _NEW_PASSWORD,
         })
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "INVALID_RESET_TOKEN"
@@ -162,17 +164,19 @@ class TestResetPassword:
         assert key.startswith("password_reset:")
 
     async def test_rate_limit_per_ip(self, client, make_user):
-        """RESET_PASSWORD_IP = (10, 3600) — 11º request bloqueado."""
+        """RESET_PASSWORD_IP = (10, 3600) — 11º request bloqueado.
+        Token length >=32 pra passar o Pydantic guard; value inválido garante
+        que o service retorna 400 sem tocar DB (não consome state)."""
         await make_user(email=_EMAIL, password=_OLD_PASSWORD)
+        bogus_token = "a" * 43
 
         for _ in range(10):
-            # Tokens inválidos pra não consumir state do DB
             await client.post("/auth/reset-password", json={
-                "token": "bad-token", "new_password": _NEW_PASSWORD,
+                "token": bogus_token, "new_password": _NEW_PASSWORD,
             })
 
         r = await client.post("/auth/reset-password", json={
-            "token": "bad-token", "new_password": _NEW_PASSWORD,
+            "token": bogus_token, "new_password": _NEW_PASSWORD,
         })
         assert r.status_code == 429
 

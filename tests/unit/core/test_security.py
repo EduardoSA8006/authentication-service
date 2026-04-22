@@ -3,6 +3,7 @@ from app.core.security import (
     _session_key,
     generate_csrf_token,
     generate_session_token,
+    ip_subnet,
     verify_csrf_token,
 )
 
@@ -51,3 +52,27 @@ class TestSessionToken:
         assert key.startswith("session:")
         assert token not in key  # raw token não aparece na chave
         assert len(key) == len("session:") + 64  # sha256 hex
+
+
+class TestIPSubnet:
+    def test_ipv4_collapses_to_24(self):
+        """Mesmo /24 → mesma subnet (NAT/DHCP não dispara alerta)."""
+        assert ip_subnet("192.168.1.10") == ip_subnet("192.168.1.250")
+
+    def test_ipv4_different_24_differs(self):
+        assert ip_subnet("192.168.1.10") != ip_subnet("192.168.2.10")
+
+    def test_ipv6_collapses_to_48(self):
+        """/48 IPv6: alocação típica de ISP para um cliente."""
+        assert ip_subnet("2001:db8:abcd::1") == ip_subnet("2001:db8:abcd:ffff::1")
+
+    def test_ipv6_different_48_differs(self):
+        assert ip_subnet("2001:db8:abcd::1") != ip_subnet("2001:db8:abce::1")
+
+    def test_sentinel_returns_none(self):
+        assert ip_subnet("unknown") is None
+        assert ip_subnet("invalid") is None
+
+    def test_garbage_returns_none(self):
+        assert ip_subnet("../../../etc/passwd") is None
+        assert ip_subnet("") is None

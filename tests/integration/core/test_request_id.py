@@ -15,9 +15,19 @@ class TestRequestID:
         assert r1.headers["x-request-id"] != r2.headers["x-request-id"]
 
     async def test_echoes_incoming_request_id(self, client):
-        custom = "custom-trace-id-abc123"
+        """Cliente envia ID hex-only → ecoado verbatim (formato interno é
+        hex via uuid4().hex; sanitize_request_id descarta tudo que não for hex)."""
+        custom = "abc123def456"
         r = await client.get("/health", headers={"X-Request-ID": custom})
         assert r.headers["x-request-id"] == custom
+
+    async def test_sanitizes_non_hex_request_id(self, client):
+        """Cliente envia ID com chars não-hex (dashes, CRLF, etc) → sanitizado
+        para hex-only. Evita log injection (CRLF) e uniformiza formato."""
+        custom = "custom-trace-id-abc123"
+        r = await client.get("/health", headers={"X-Request-ID": custom})
+        # Chars hex preservados em ordem: c-a-c-e-d-a-b-c-1-2-3
+        assert r.headers["x-request-id"] == "cacedabc123"
 
     async def test_sanitizes_malicious_request_id(self, client):
         """CRLF no X-Request-ID seria log injection — invariante é 'sem CRLF'."""

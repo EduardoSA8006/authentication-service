@@ -98,4 +98,6 @@ async def check_rate_limit(scope: str, key: str, limit: int, window: int) -> Non
         raise
     except Exception:
         logger.warning("Rate limit unavailable for %s, rejecting request", scope)
-        raise ServiceUnavailableError
+        # `from None` suprime o "During handling of..." — mensagem ao cliente
+        # é sempre SERVICE_UNAVAILABLE, detalhe do Redis fica só no log.
+        raise ServiceUnavailableError from None

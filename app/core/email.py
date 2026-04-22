@@ -18,7 +18,9 @@ _jinja_env = Environment(
     loader=FileSystemLoader(_TEMPLATE_DIR),
     autoescape=select_autoescape(["html"]),
     auto_reload=settings.DEBUG,
-    enable_async=False,
+    # enable_async: render_async não bloqueia o event loop. Impacto é pequeno
+    # em templates simples, mas o padrão correto em código async.
+    enable_async=True,
 )
 
 # SMTP header injection guard (RFC 5321 §4.1.1.2)
@@ -46,8 +48,8 @@ async def send_email(
         if any(c in _FORBIDDEN_HEADER_CHARS for c in value):
             raise ValueError(f"Invalid character in {field_name}")
 
-    html_body = _jinja_env.get_template(f"{template_name}.html").render(**context)
-    text_body = _jinja_env.get_template(f"{template_name}.txt").render(**context)
+    html_body = await _jinja_env.get_template(f"{template_name}.html").render_async(**context)
+    text_body = await _jinja_env.get_template(f"{template_name}.txt").render_async(**context)
 
     msg = EmailMessage()
     msg["From"] = settings.SMTP_FROM
@@ -56,6 +58,14 @@ async def send_email(
     msg.set_content(text_body)
     msg.add_alternative(html_body, subtype="html")
 
+    # STARTTLS (start_tls) e SMTPS implícito (use_tls) são mutuamente
+    # exclusivos em aiosmtplib: use_tls abre o socket já em TLS (porta 465);
+    # start_tls upgrada plain → TLS via STARTTLS command (porta 587).
+    #
+    # validate_certs=True é explícito (default da lib já é True, mas fixar
+    # aqui evita regressão se alguém copiar kwargs pra outro call-site que
+    # mude o default via tls_context customizado). Self-signed em dev
+    # precisa de override consciente — fail-loud antes, não silencioso.
     await aiosmtplib.send(
         msg,
         hostname=settings.SMTP_HOST,
@@ -63,6 +73,8 @@ async def send_email(
         username=settings.SMTP_USER or None,
         password=settings.SMTP_PASSWORD or None,
         start_tls=settings.SMTP_TLS,
+        use_tls=settings.SMTP_IMPLICIT_TLS,
+        validate_certs=True,
         timeout=settings.SMTP_TIMEOUT,
     )
 
@@ -129,6 +141,23 @@ async def send_password_reset_email(
 # Security event notifications — fire-and-forget
 # ---------------------------------------------------------------------------
 
+_MAX_TEMPLATE_FIELD = 256
+
+
+def _truncate_for_template(value: str, max_len: int = _MAX_TEMPLATE_FIELD) -> str:
+    """Corta strings que vão pro contexto de email. UA pode vir com 10KB+ de
+    lixo (extensões, strings de debug, payloads de ataque); IP cru pode ter
+    qualquer coisa que o caller passe. Autoescape do Jinja protege de XSS,
+    mas sem truncagem o email final vira gigante (email gateways rejeitam)
+    e o conteúdo visível fica ilegível. 256 chars cobre UAs legítimos."""
+    if value is None:
+        return ""
+    s = str(value)
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
 def _ua_summary(ua: str) -> str:
     """Heurística simples pra resumir User-Agent em "Browser em OS" legível.
     Não é 100% accurate (UA strings são inconsistentes), mas suficiente para
@@ -185,8 +214,11 @@ async def send_new_login_notification(
             template_name="new_login_notification",
             context={
                 "name": name,
-                "ip": ip,
-                "device": _ua_summary(user_agent),
+                # Truncagem defensiva: UA pode vir inflado (extensões, debug
+                # strings) e IP é controlado parcialmente pelo header path.
+                # Autoescape já cobre XSS; limite protege tamanho final do email.
+                "ip": _truncate_for_template(ip),
+                "device": _truncate_for_template(_ua_summary(user_agent)),
                 "when": _fmt_when(when),
                 "reset_link": _reset_link(),
             },
@@ -210,7 +242,7 @@ async def send_password_changed_notification(
             template_name="password_changed_notification",
             context={
                 "name": name,
-                "ip": ip,
+                "ip": _truncate_for_template(ip),
                 "when": _fmt_when(when),
             },
         )

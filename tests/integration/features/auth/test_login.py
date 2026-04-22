@@ -37,13 +37,30 @@ class TestLogin:
 
     async def test_rate_limit_per_ip(self, client, make_user):
         await make_user(email="rl@test.com", password="SenhaForte@2026")
-        # LOGIN_IP = (10, 60)
+        # LOGIN_IP = (10, 60). Mas LOGIN_EMAIL = (5, 300) corta antes —
+        # o objetivo aqui é só garantir que SOMEWHERE vira 429, qualquer
+        # camada (ip OU email).
         for _ in range(10):
             await client.post("/auth/login", json={
                 "email": "rl@test.com", "password": "wrong-pw-attempt",
             })
         r = await client.post("/auth/login", json={
             "email": "rl@test.com", "password": "SenhaForte@2026",
+        })
+        assert r.status_code == 429
+
+    async def test_rate_limit_per_email(self, client, make_user):
+        """N-21: LOGIN_EMAIL=(5,300) — brute-force single-IP é cortado
+        ANTES do lockout (N-6 threshold 10). Evita atacante conseguir 10
+        tentativas antes do hard lock."""
+        await make_user(email="rlemail@test.com", password="SenhaForte@2026")
+        for _ in range(5):
+            await client.post("/auth/login", json={
+                "email": "rlemail@test.com", "password": "wrong-pw",
+            })
+        # 6ª é bloqueada — com senha correta também, o limiter é per-email.
+        r = await client.post("/auth/login", json={
+            "email": "rlemail@test.com", "password": "SenhaForte@2026",
         })
         assert r.status_code == 429
 

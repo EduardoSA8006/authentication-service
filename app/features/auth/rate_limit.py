@@ -1,10 +1,10 @@
-import hashlib
 import logging
 
 from app.core.captcha import verify_captcha
 from app.core.config import settings
 from app.core.exceptions import RateLimitedError, ServiceUnavailableError
 from app.core.redis import get_redis
+from app.core.security import hash_email
 from app.features.auth.exceptions import CaptchaInvalidError, SuspiciousActivityError
 
 logger = logging.getLogger(__name__)
@@ -17,9 +17,19 @@ LOGIN_IP = (10, 60)
 LOGIN_EMAIL = (5, 300)
 VERIFY_IP = (10, 60)
 LOGOUT_IP = (10, 60)
+# /logout-all tem bucket próprio: é mais custoso (revoga todas sessões +
+# dispara notificação por email) e deve ser raro. Compartilhar bucket com
+# /logout permitiria atacante esgotar /logout-all via spam em /logout.
+LOGOUT_ALL_IP = (5, 300)
 DELETE_ACCOUNT_IP = (3, 60)
 DELETE_ACCOUNT_USER = (5, 300)   # 5 por 5min por user — evita password probing via /delete
 ME_IP = (30, 60)
+# Bucket por-user defende amplification via botnet (sessão hijacked com IPs
+# rotativos atinge 30/min por IP, infinito via rotação). /me e /sessions são
+# leitura mas fazem fetch+derivação (password_advisory); valor acima do IP
+# evita cortar user legítimo com múltiplos tabs/devices.
+ME_USER = (120, 60)
+SESSIONS_LIST_USER = (120, 60)
 RESEND_IP = (3, 3600)
 RESEND_EMAIL = (1, 600)
 FORGOT_PASSWORD_IP = (5, 3600)
@@ -27,6 +37,9 @@ FORGOT_PASSWORD_EMAIL = (3, 3600)  # 3 por hora por email-alvo — evita inbox s
 CHANGE_PASSWORD_IP = (5, 3600)
 CHANGE_PASSWORD_USER = (3, 3600)
 RESET_PASSWORD_IP = (10, 3600)  # mais generoso — usuário pode errar a nova senha
+# Session management: GET é leve, DELETE é raro (usuário revoga manualmente)
+SESSIONS_LIST_IP = (30, 60)
+SESSIONS_REVOKE_IP = (10, 60)
 
 # ---------------------------------------------------------------------------
 # Progressive lockout — duas camadas (N-6)
@@ -48,19 +61,19 @@ _LOCKOUT_GLOBAL_THRESHOLD = 50
 _LOCKOUT_GLOBAL_WINDOW = 1800  # 30 minutes
 
 
-def _email_key(email: str) -> str:
-    return hashlib.sha256(email.encode()).hexdigest()[:32]
-
-
 def _lockout_key(email: str, ip: str) -> str:
-    return f"login_failures:{_email_key(email)}:{ip}"
+    # Usa hash_email (HMAC-SHA256 com SECRET_KEY, 16 chars) — mesma função
+    # de anonimização dos logs e dos ponteiros de token. HMAC previne
+    # pré-computação: sem o SECRET_KEY atacante não consegue gerar keys
+    # de lockout para emails-alvo.
+    return f"login_failures:{hash_email(email)}:{ip}"
 
 
 def _lockout_global_key(email: str) -> str:
     """Contador global por email — soma falhas de TODOS os IPs.
     Não é limpo em sucesso (evita atacante usar credential roubada pra
     resetar o counter e continuar); expira só pela TTL natural."""
-    return f"login_failures_global:{_email_key(email)}"
+    return f"login_failures_global:{hash_email(email)}"
 
 
 async def check_login_lockout(
@@ -105,7 +118,9 @@ async def check_login_lockout(
         raise
     except Exception:
         logger.warning("Lockout check unavailable, rejecting request")
-        raise ServiceUnavailableError
+        # `from None` suprime o "During handling of..." — cliente recebe
+        # SERVICE_UNAVAILABLE, detalhe Redis fica no log warning.
+        raise ServiceUnavailableError from None
 
 
 async def record_login_failure(email: str, ip: str) -> None:
@@ -115,8 +130,14 @@ async def record_login_failure(email: str, ip: str) -> None:
     try:
         redis = get_redis()
 
+        # transaction=True (MULTI/EXEC) torna INCR+EXPIRE-NX atômico no
+        # servidor. Sem isso, crash/disconnect entre INCR e EXPIRE deixaria
+        # contador sem TTL → lockout permanente silencioso quando chegar ao
+        # threshold. redis-py default já é True, mas explicitamos pra que a
+        # garantia fique visível (e um futuro `pipeline(transaction=False)` não
+        # passe despercebido).
         pair_key = _lockout_key(email, ip)
-        pipe = redis.pipeline()
+        pipe = redis.pipeline(transaction=True)
         pipe.incr(pair_key)
         pipe.expire(pair_key, _LOCKOUT_BASE_WINDOW, nx=True)
         count, _ = await pipe.execute()
@@ -126,7 +147,7 @@ async def record_login_failure(email: str, ip: str) -> None:
             await redis.expire(pair_key, new_window)
 
         global_key = _lockout_global_key(email)
-        pipe = redis.pipeline()
+        pipe = redis.pipeline(transaction=True)
         pipe.incr(global_key)
         pipe.expire(global_key, _LOCKOUT_GLOBAL_WINDOW, nx=True)
         await pipe.execute()
@@ -150,4 +171,7 @@ async def clear_login_failures(
             pipe.delete(_lockout_global_key(email))
         await pipe.execute()
     except Exception:
-        pass
+        # Best-effort: clear é tentativa de limpeza pós-login bem-sucedido;
+        # falha aqui não afeta o login (já retornado ao cliente). Log é leve
+        # mas essencial pra diagnosticar "por que lockout persiste".
+        logger.warning("Failed to clear login failures", exc_info=True)

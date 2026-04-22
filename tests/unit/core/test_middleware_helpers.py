@@ -1,7 +1,8 @@
 """Unit tests para helpers de middleware."""
 from unittest.mock import MagicMock
 
-from app.core.middleware import get_client_ip, _stable_ua
+from app.core.middleware import get_client_ip
+from app.core.security import stable_ua
 
 
 class TestClientIP:
@@ -54,24 +55,50 @@ class TestClientIP:
         r.headers = {}
         assert get_client_ip(r) == "unknown"
 
+    def test_rejects_malformed_xff_value(self):
+        """Atacante atrás de proxy confiável injeta lixo no XFF — resultado
+        não pode poluir keys de Redis, logs ou templates de email."""
+        for bad in ("../../../etc/passwd", "A" * 10000, "💩", "not-an-ip"):
+            req = self._make_request("127.0.0.1", {"x-forwarded-for": bad})
+            assert get_client_ip(req) == "invalid"
+
+    def test_rejects_malformed_peer(self):
+        req = self._make_request("not-an-ip")
+        assert get_client_ip(req) == "invalid"
+
+    def test_canonicalizes_ipv4(self):
+        """127.0.0.001 e 127.0.0.1 não podem virar chaves Redis distintas."""
+        req = self._make_request("1.2.3.4", {})
+        # Sanidade: IP válido passa intacto
+        assert get_client_ip(req) == "1.2.3.4"
+
+    def test_skips_malformed_entry_in_xff_chain(self):
+        """XFF com entrada inválida no meio: fallback para próxima entrada válida."""
+        req = self._make_request(
+            "127.0.0.1",
+            {"x-forwarded-for": "5.6.7.8, garbage"},
+        )
+        # "garbage" (rightmost) descartado → 5.6.7.8
+        assert get_client_ip(req) == "5.6.7.8"
+
 
 class TestStableUA:
     def test_strips_chrome_version(self):
         ua1 = "Mozilla/5.0 Chrome/130.0.6723.58 Safari/537.36"
         ua2 = "Mozilla/5.0 Chrome/131.0.6784.12 Safari/537.36"
-        assert _stable_ua(ua1) == _stable_ua(ua2)
+        assert stable_ua(ua1) == stable_ua(ua2)
 
     def test_preserves_browser_identity(self):
-        chrome = _stable_ua("Mozilla/5.0 Chrome/130.0 Safari/537.36")
-        firefox = _stable_ua("Mozilla/5.0 Firefox/130.0")
+        chrome = stable_ua("Mozilla/5.0 Chrome/130.0 Safari/537.36")
+        firefox = stable_ua("Mozilla/5.0 Firefox/130.0")
         assert chrome != firefox
 
     def test_handles_empty(self):
-        assert _stable_ua("") == ""
+        assert stable_ua("") == ""
 
     def test_strips_multiple_versions(self):
         ua = "X/1.0 Y/2.0.3 Z/4.5"
-        stable = _stable_ua(ua)
+        stable = stable_ua(ua)
         assert "1.0" not in stable
         assert "2.0" not in stable
         assert "4.5" not in stable

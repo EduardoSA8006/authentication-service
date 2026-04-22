@@ -32,5 +32,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    # Só o trigger é dropado. A função update_updated_at() tem nome genérico
+    # e pode estar sendo usada por triggers em outras tabelas criadas por
+    # migrations posteriores — dropá-la quebraria aqueles triggers em cascata.
+    # Migration seguinte pode dropá-la explicitamente se for a última usuária.
     op.execute("DROP TRIGGER IF EXISTS users_updated_at ON users;")
-    op.execute("DROP FUNCTION IF EXISTS update_updated_at();")

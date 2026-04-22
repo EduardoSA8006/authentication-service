@@ -8,7 +8,7 @@ class Settings(BaseSettings):
 
     # PostgreSQL
     POSTGRES_USER: str = "auth"
-    POSTGRES_PASSWORD: str = "auth"
+    POSTGRES_PASSWORD: str = "auth"  # noqa: S105 — dev default; validate_settings bloqueia em prod
     POSTGRES_DB: str = "auth_service"
     POSTGRES_HOST: str = "postgres"
     POSTGRES_PORT: int = 5432
@@ -31,8 +31,10 @@ class Settings(BaseSettings):
             return base
         if self.POSTGRES_CA_CERT:
             return f"{base}?sslmode=verify-full&sslrootcert={self.POSTGRES_CA_CERT}"
-        # SSL sem CA — ainda usa system CA bundle (verify-ca em vez de verify-full)
-        return f"{base}?sslmode=verify-ca"
+        # Sem CA explícita: libpq usa system CA bundle por padrão. verify-full
+        # ainda valida hostname contra CN/SAN — verify-ca sozinho permitiria
+        # MitM com cert válido emitido por qualquer CA do bundle.
+        return f"{base}?sslmode=verify-full"
 
     # Redis
     REDIS_HOST: str = "redis"
@@ -49,7 +51,7 @@ class Settings(BaseSettings):
     # MinIO
     MINIO_ENDPOINT: str = "minio:9000"
     MINIO_ACCESS_KEY: str = "minioadmin"
-    MINIO_SECRET_KEY: str = "minioadmin"
+    MINIO_SECRET_KEY: str = "minioadmin"  # noqa: S105 — dev default; validate_settings bloqueia em prod
     MINIO_SECURE: bool = False
 
     # Security
@@ -63,22 +65,50 @@ class Settings(BaseSettings):
     REDIS_CA_CERT: str = ""              # path to CA bundle; opcional (rediss:// usa system CAs)
     HIBP_ENABLED: bool = True            # checa senha contra HaveIBeenPwned via k-anonymity
     HIBP_TIMEOUT: float = 3.0            # fail-open após timeout
+    # Email de contato opcional incluído no User-Agent do HIBP. HIBP docs
+    # recomendam contact info pra que abuse-detection da Cloudflare consiga
+    # contatar operador antes de bloquear. Vazio = UA genérico, ainda válido
+    # mas risco de bloqueio silencioso sob volume alto.
+    HIBP_CONTACT: str = ""
 
-    # CAPTCHA — step-up quando Layer 2 do lockout dispara (N-6 integration)
-    CAPTCHA_ENABLED: bool = False
+    # Argon2id parallelism. Default 4 assume host/container com 4+ cores
+    # dedicados. Em k8s com CPU request=1 ou VPS 2-core, parallelism=4 não
+    # ganha nada e pode degradar por contention — ajustar pra `os.cpu_count()`
+    # do deploy target. Mudanças em produção disparam rehash no próximo login
+    # de cada usuário (check_needs_rehash), custo único distribuído.
+    ARGON2_PARALLELISM: int = 4
+
+    # CAPTCHA — step-up quando Layer 2 do lockout dispara (N-6 integration).
+    # Default True: sem CAPTCHA o Layer 2 vira hard-block de 30min sem bypass
+    # para usuário legítimo sob credential stuffing distribuído. Em produção,
+    # validate_settings_for_production bloqueia startup se ENABLED=False.
+    CAPTCHA_ENABLED: bool = True
     CAPTCHA_PROVIDER: str = "turnstile"  # "turnstile" (Cloudflare); futuro: hcaptcha/recaptcha
     CAPTCHA_SECRET: str = ""             # server-side secret do provider
     CAPTCHA_SITE_KEY: str = ""           # public, frontend usa pra renderizar widget
     CAPTCHA_VERIFY_TIMEOUT: float = 5.0
 
-    # Email / SMTP
+    # Email / SMTP — TLS vem em dois sabores:
+    #   SMTP_TLS=true, SMTP_IMPLICIT_TLS=false → STARTTLS (porta 587, padrão
+    #     da maioria dos provedores modernos: Gmail, Outlook corporate,
+    #     Postmark, Mailgun)
+    #   SMTP_TLS=false, SMTP_IMPLICIT_TLS=true → SMTPS (TLS implícito na
+    #     porta 465, requerido por SES/SendGrid em alguns tiers e tooling
+    #     legacy)
+    # Os dois flags são mutuamente exclusivos: validate_settings bloqueia
+    # combinação inválida.
     SMTP_HOST: str = "mailhog"
     SMTP_PORT: int = 1025
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
-    SMTP_TLS: bool = False
+    SMTP_TLS: bool = False            # STARTTLS (porta 587)
+    SMTP_IMPLICIT_TLS: bool = False   # SMTPS (porta 465)
     SMTP_FROM: str = "Authentication Service <noreply@localhost>"
-    SMTP_TIMEOUT: int = 15  # segundos
+    # 10s cobre jitter normal de relays (Mailgun/SES/Postmark p99 < 3s); 15s
+    # permitia backlog quando o relay estava lento — com retry exponencial
+    # (3 tentativas) em N logins concorrentes, o drain de shutdown (10s)
+    # extrapola. Operador em relay reconhecidamente lento pode subir via .env.
+    SMTP_TIMEOUT: int = 10  # segundos
 
     # Frontend URL (obrigatório — sem default; Pydantic falha se ausente)
     FRONTEND_URL: str
@@ -123,7 +153,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
-_INSECURE_SECRET = "change-me-in-production-use-a-random-64-char-string"
+_INSECURE_SECRET = "change-me-in-production-use-a-random-64-char-string"  # noqa: S105 — placeholder pra detectar que SECRET_KEY não foi trocado
 _MIN_SECRET_LENGTH = 32
 _MIN_SERVICE_PASSWORD_LENGTH = 12
 _INSECURE_DEFAULTS = frozenset({
@@ -179,7 +209,7 @@ def validate_settings_for_production() -> list[str]:
     elif not settings.POSTGRES_CA_CERT:
         warnings.append(
             "POSTGRES_SSL is True but POSTGRES_CA_CERT is empty — "
-            "connection encrypted but certificate not fully verified (verify-ca only)"
+            "certificate validated against system CAs only (no custom CA pinning)"
         )
 
     if not settings.REDIS_TLS:
@@ -215,11 +245,28 @@ def validate_settings_for_production() -> list[str]:
     if settings.SMTP_HOST in {"mailhog", "localhost"}:
         warnings.append(f"SMTP_HOST is '{settings.SMTP_HOST}' — dev-only")
 
-    if not settings.SMTP_TLS:
-        warnings.append("SMTP_TLS is False — email sent in plaintext")
+    if not settings.SMTP_TLS and not settings.SMTP_IMPLICIT_TLS:
+        warnings.append(
+            "SMTP_TLS and SMTP_IMPLICIT_TLS both False — email sent in plaintext",
+        )
+
+    if settings.SMTP_TLS and settings.SMTP_IMPLICIT_TLS:
+        warnings.append(
+            "SMTP_TLS and SMTP_IMPLICIT_TLS both True — escolha um: STARTTLS "
+            "(587) ou SMTPS implícito (465), não os dois",
+        )
 
     if not settings.SMTP_PASSWORD:
         warnings.append("SMTP_PASSWORD is empty")
+
+    if not settings.ALLOWED_HOSTS:
+        # Lista vazia = TrustedHostMiddleware rejeita TUDO (fail-closed,
+        # bom pra segurança). Mas em produção com config assim o serviço
+        # não responde nada — quase certamente misconfig.
+        warnings.append(
+            "ALLOWED_HOSTS is empty — TrustedHostMiddleware rejeitará "
+            "todos os requests",
+        )
 
     if "localhost" in settings.ALLOWED_HOSTS:
         warnings.append("ALLOWED_HOSTS contains 'localhost'")
@@ -237,7 +284,10 @@ def validate_settings_for_production() -> list[str]:
         )
 
     # COOKIE_DOMAIN deve ser sufixo do host de FRONTEND_URL — senão cookies
-    # não são enviados pelo browser
+    # não são enviados pelo browser. Validação de formato completa (sem
+    # scheme, sem espaços, sintaxe DNS válida) não é feita aqui: Starlette
+    # falha com erro explícito ao tentar setar um cookie com valor inválido.
+    # O teste de sufixo cobre o erro de config mais comum.
     if settings.COOKIE_DOMAIN:
         from urllib.parse import urlparse
         fe_host = (urlparse(settings.FRONTEND_URL).hostname or "").lower()

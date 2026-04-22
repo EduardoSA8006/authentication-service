@@ -67,6 +67,27 @@ def validate_and_format_name(raw: str) -> str:
 # ---------------------------------------------------------------------------
 
 def validate_and_normalize_email(raw: str) -> str:
+    """Normaliza email para lowercase integral — incluindo localpart.
+
+    Trade-off aceito: RFC 5321 declara localpart como case-sensitive e
+    domínio como case-insensitive. 99%+ dos provedores (Gmail, Outlook,
+    corporate Exchange, etc) normalizam o localpart em delivery, mas
+    MTAs RFC-strict podem distinguir User@x.com de user@x.com — pra eles
+    essa normalização perde a entrega.
+
+    Por que preservamos lower() integral mesmo assim:
+    1. Anti-enumeração: sem essa normalização, um atacante poderia criar
+       contas paralelas User@x.com, USER@x.com, user@x.com que tecnicamente
+       são diferentes, cada uma passando no /register — drena o bucket
+       de rate-limit por email e pode mascarar takeover de conta.
+    2. Consistência: os logs/hash_email trabalham com o normalizado; sem
+       lower integral, mesmo dono de conta teria múltiplos hashes em
+       telemetria.
+    3. UX: usuários tipicamente não entendem sensibilidade de case e
+       digitam inconsistente entre registro e login.
+
+    O custo (incompatibilidade com <1% dos MTAs RFC-strict) é aceitável
+    pelo ganho em anti-enum + operacional."""
     raw = raw.strip()
     try:
         result = _validate_email(raw, check_deliverability=False)
@@ -113,8 +134,23 @@ def _is_common(password: str) -> bool:
     return lower in COMMON_PASSWORDS or _NORM_RE.sub("", lower) in COMMON_PASSWORDS
 
 
+# QWERTY US layout — suficiente pro caso comum. Layouts alternativos (Dvorak,
+# ABNT2 ç) não são coberto aqui, mas os walks típicos ("qwerty", "asdf",
+# "zxcv", "1234") são no mesmo hardware físico.
+_KEYBOARD_ROWS = (
+    "qwertyuiop",
+    "asdfghjkl",
+    "zxcvbnm",
+    "1234567890",
+)
+
+
 def _is_sequential(password: str, min_seq: int = 4) -> bool:
+    """True se senha contém sequência ASCII (abcd, 1234, dcba) OU keyboard
+    walk horizontal (qwer, asdf, zxcv, poiu)."""
     lower = password.lower()
+
+    # Sequência ASCII / repetição (funciona pra qualquer char, não só teclado)
     for i in range(len(lower) - min_seq + 1):
         diffs = [
             ord(lower[i + j + 1]) - ord(lower[i + j])
@@ -126,6 +162,14 @@ def _is_sequential(password: str, min_seq: int = 4) -> bool:
             return True
         if all(d == 0 for d in diffs):
             return True
+
+    # Keyboard walks horizontais (qwerty layout)
+    for row in _KEYBOARD_ROWS:
+        for start in range(len(row) - min_seq + 1):
+            segment = row[start:start + min_seq]
+            if segment in lower or segment[::-1] in lower:
+                return True
+
     return False
 
 
@@ -196,7 +240,13 @@ def validate_date_of_birth(dob: date) -> None:
     if dob < _MIN_DOB:
         raise ValueError("Data de nascimento inválida")
 
-    age = (today - dob).days / 365.25
+    # Idade em anos civis — subtrai 1 se o aniversário ainda não aconteceu
+    # este ano. (today - dob).days / 365.25 tem erro de arredondamento que
+    # rejeita aniversariante do dia em anos bissextos (ex: 13 anos pontuais
+    # ficam em age=12.999...).
+    age = today.year - dob.year - (
+        (today.month, today.day) < (dob.month, dob.day)
+    )
     if age > _MAX_AGE_YEARS:
         raise ValueError("Data de nascimento inválida")
 

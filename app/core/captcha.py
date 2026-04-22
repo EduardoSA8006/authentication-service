@@ -9,9 +9,8 @@ TTL global expirar; Turnstile tem ~99.99% uptime histórico).
 """
 import logging
 
-import httpx
-
 from app.core.config import settings
+from app.core.http_client import get_http_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +35,32 @@ async def verify_captcha(token: str, remote_ip: str) -> bool:
     return False
 
 
+_IP_SENTINELS = frozenset({"invalid", "unknown", ""})
+
+
 async def _verify_turnstile(token: str, remote_ip: str) -> bool:
     """Cloudflare Turnstile siteverify endpoint.
     Docs: https://developers.cloudflare.com/turnstile/get-started/server-side-validation/
+
+    `remoteip` é opcional no siteverify. Omitimos quando get_client_ip devolve
+    sentinel ("invalid"/"unknown") — passá-los faz o provider retornar
+    success=false com invalid-parameter, bloqueando vítima legítima atrás de
+    proxy mal-configurado do bypass Layer 2.
     """
     payload = {
         "secret": settings.CAPTCHA_SECRET,
         "response": token,
-        "remoteip": remote_ip,
     }
+    if remote_ip not in _IP_SENTINELS:
+        payload["remoteip"] = remote_ip
     try:
-        async with httpx.AsyncClient(timeout=settings.CAPTCHA_VERIFY_TIMEOUT) as client:
-            r = await client.post(_TURNSTILE_VERIFY_URL, data=payload)
-            r.raise_for_status()
-            result = r.json()
+        client = get_http_client()
+        r = await client.post(
+            _TURNSTILE_VERIFY_URL, data=payload,
+            timeout=settings.CAPTCHA_VERIFY_TIMEOUT,
+        )
+        r.raise_for_status()
+        result = r.json()
     except Exception:
         logger.warning("Turnstile verify failed (fail-closed)", exc_info=True)
         return False

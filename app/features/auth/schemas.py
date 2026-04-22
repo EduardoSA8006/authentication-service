@@ -42,7 +42,9 @@ class RegisterRequest(BaseModel):
 
 class LoginRequest(BaseModel):
     email: str
-    password: str = Field(max_length=128)
+    # min_length=1: rejeita senha vazia no schema (422) antes de bater no
+    # hasher — evita ciclo Argon2id (~300ms) para caso trivialmente inválido.
+    password: str = Field(min_length=1, max_length=128)
 
     @field_validator("email")
     @classmethod
@@ -82,12 +84,19 @@ class UserResponse(BaseModel):
     def password_advisory(self) -> Literal["breached"] | None:
         """N-5: `"breached"` se HIBP detectou a senha em vazamento (via worker
         pós-login). Frontend deve exibir banner com link pra trocar senha.
-        Null = sem aviso pendente (nunca detectado ou senha já foi trocada)."""
+        Null = sem aviso pendente (nunca detectado ou senha já foi trocada).
+
+        Nota (N-25): este campo vaza no /openapi.json quando DEBUG=True —
+        atacante descobriria que existe tracking server-side de breach.
+        Em produção, DEBUG=false (enforced pelo validate_settings) desabilita
+        /docs/redoc/openapi.json; o schema não é exposto. Trade-off aceito."""
         return "breached" if self.password_breach_detected_at is not None else None
 
 
 class DeleteAccountRequest(BaseModel):
-    password: str = Field(max_length=128)
+    # min_length=1: rejeita senha vazia em 422 antes do Argon2 verify
+    # (~300ms). Mesma defesa-em-profundidade do LoginRequest.
+    password: str = Field(min_length=1, max_length=128)
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -96,13 +105,14 @@ class ForgotPasswordRequest(BaseModel):
     @field_validator("email")
     @classmethod
     def check_email(cls, v: str) -> str:
-        # Fallback strip/lower se normalização falhar — anti-enum exige que
-        # emails inválidos cheguem no worker e sejam silenciados lá, não
-        # rejeitados aqui com 422 (que distinguiria do caminho 202).
-        try:
-            return validate_and_normalize_email(v)
-        except ValueError:
-            return v.strip().lower()
+        # Validação estrita (mesmo padrão de RegisterRequest). Strings
+        # malformadas rejeitadas com 422 antes de tocarem rate-limit Redis —
+        # anti-enum continua intacto para emails *bem-formados* (existente vs
+        # não-existente vs soft-deleted → todos 202 via worker silencioso).
+        # 422 em formato inválido é um leak aceitável (mesma superfície do
+        # /register) e o trade-off vale pra não poluir keyspace Redis com
+        # payloads arbitrários do cliente.
+        return validate_and_normalize_email(v)
 
 
 class ChangePasswordRequest(BaseModel):
@@ -112,9 +122,35 @@ class ChangePasswordRequest(BaseModel):
 class ResetPasswordRequest(BaseModel):
     # Validação de força + contextual é feita no service (precisa do user
     # pra context name/email). Aqui só length guard.
-    token: str = Field(min_length=1, max_length=128)
-    new_password: str = Field(max_length=128)
+    # token_urlsafe(32) produz exatamente 43 chars base64url; min_length=32
+    # é um lower bound defensivo (sobra para futuras mudanças sem quebrar
+    # tokens vivos), max_length=128 continua protegendo contra abuse.
+    token: str = Field(min_length=32, max_length=128)
+    # min_length=8: rejeita senha curta em 422 ANTES do _consume_reset_token
+    # (GETDEL one-shot). Sem isso, new_password="" consome o token e aborta
+    # na validação de força — usuário precisa pedir /forgot-password de novo.
+    # validate_password continua checando entropy, breach e context no
+    # service; o mínimo aqui é só guard-rail contra o side-effect do consume.
+    new_password: str = Field(min_length=8, max_length=128)
 
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class SessionInfo(BaseModel):
+    """Resumo público de uma sessão ativa. NÃO inclui o token nem campos que
+    permitiriam hijack. IP é mostrado só em prefixo /24 (IPv4) ou /48 (IPv6)
+    — identifica a rede sem expor endereço completo no payload da response
+    (evita logging de IP cheio em access logs intermediários)."""
+
+    session_id: str = Field(min_length=64, max_length=64)
+    created_at: datetime
+    last_active: datetime
+    ip_prefix: str | None
+    device: str  # Browser + OS via _ua_summary; nunca o UA bruto.
+    is_current: bool
+
+
+class SessionListResponse(BaseModel):
+    sessions: list[SessionInfo]

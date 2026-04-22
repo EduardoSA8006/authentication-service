@@ -3,7 +3,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.middleware import get_client_ip
-from app.core.security import clear_session_cookies, set_session_cookies
+from app.core.security import (
+    clear_session_cookies,
+    ip_subnet,
+    session_id_from_token,
+    set_session_cookies,
+)
 from app.shared.dependencies import get_current_session
 from app.features.auth import rate_limit as rl
 from app.core.rate_limit import check_rate_limit
@@ -16,6 +21,8 @@ from app.features.auth.schemas import (
     RegisterRequest,
     ResendVerificationRequest,
     ResetPasswordRequest,
+    SessionInfo,
+    SessionListResponse,
     UserResponse,
     VerifyEmailRequest,
 )
@@ -23,12 +30,14 @@ from app.features.auth.service import (
     change_password_request,
     forgot_password,
     get_user_from_session,
+    list_active_sessions,
     login_user,
     logout_all_sessions,
     logout_user,
     register_user,
     resend_verification_email,
     reset_password,
+    revoke_session,
     soft_delete_user,
     verify_email,
 )
@@ -70,12 +79,33 @@ async def login(
 ):
     ip = get_client_ip(request)
     await check_rate_limit("login:ip", ip, *rl.LOGIN_IP)
+    # LOGIN_EMAIL (5/5min) corta brute-force single-IP ANTES do lockout N-6
+    # disparar. Sem isso, atacante de 1 IP tentaria 10 senhas por email até
+    # Layer 1 bater (threshold 10) — conflito com a constante de 5 na config.
+    # Rate-limit aplica em email pra valer: usa o valor normalizado do schema.
+    #
+    # Identificador inclui subnet (/24 IPv4, /48 IPv6) pra evitar DoS-per-email:
+    # atacante de um IP só consome o bucket da própria subnet, vítima legítima
+    # em outra rede mantém bucket separado. Layer 2 (50/30min global por email,
+    # com bypass CAPTCHA) continua sendo o backstop contra botnet cross-subnet.
+    # Sentinels ("invalid"/"unknown") caem no bucket plain (sem subnet) pra não
+    # dar carona pra headers spoofados criarem buckets infinitos.
+    subnet = ip_subnet(ip) or "no-subnet"
+    await check_rate_limit(
+        "login:email", f"{body.email}|{subnet}", *rl.LOGIN_EMAIL,
+    )
+
+    # Extrai dados de transporte aqui — service.login_user é puro domínio.
+    user_agent = request.headers.get("user-agent", "")
+    captcha_token = request.headers.get("x-captcha-token")
 
     user, session_token = await login_user(
         email=body.email,
         password=body.password,
         db=db,
-        request=request,
+        ip=ip,
+        user_agent=user_agent,
+        captcha_token=captcha_token,
     )
 
     set_session_cookies(response, session_token)
@@ -105,7 +135,7 @@ async def logout_all(
     session: dict = Depends(get_current_session),
 ):
     ip = get_client_ip(request)
-    await check_rate_limit("logout:ip", ip, *rl.LOGOUT_IP)
+    await check_rate_limit("logout_all:ip", ip, *rl.LOGOUT_ALL_IP)
 
     await logout_all_sessions(session["user_id"])
     clear_session_cookies(response)
@@ -147,6 +177,7 @@ async def me(
 ):
     ip = get_client_ip(request)
     await check_rate_limit("me:ip", ip, *rl.ME_IP)
+    await check_rate_limit("me:user", session["user_id"], *rl.ME_USER)
 
     user = await get_user_from_session(session, db)
     return UserResponse.model_validate(user)
@@ -204,6 +235,51 @@ async def reset_password_endpoint(
     await reset_password(body.token, body.new_password, db, ip)
 
     return MessageResponse(message="Senha redefinida com sucesso")
+
+
+@router.get("/sessions", response_model=SessionListResponse)
+async def list_sessions(
+    request: Request,
+    session: dict = Depends(get_current_session),
+):
+    """Lista sessões ativas do usuário atual. Campos reduzidos (ver
+    list_active_sessions no service) — sem UA bruto, sem IP completo, sem
+    token. is_current marca a sessão do request pra UI destacar.
+    Requer autenticação; CSRF não se aplica (GET é método seguro)."""
+    ip = get_client_ip(request)
+    await check_rate_limit("sessions_list:ip", ip, *rl.SESSIONS_LIST_IP)
+    await check_rate_limit("sessions_list:user", session["user_id"], *rl.SESSIONS_LIST_USER)
+
+    current_token = getattr(request.state, "session_token", None)
+    current_sid = session_id_from_token(current_token) if current_token else None
+    sessions = await list_active_sessions(session["user_id"], current_sid)
+    return SessionListResponse(
+        sessions=[SessionInfo(**s) for s in sessions],
+    )
+
+
+@router.delete("/sessions/{session_id}", response_model=MessageResponse)
+async def revoke_session_endpoint(
+    session_id: str,
+    request: Request,
+    response: Response,
+    session: dict = Depends(get_current_session),
+):
+    """Revoga sessão específica do próprio usuário. Ownership verificado no
+    service (SessionNotFoundError unifica "não existe" e "não é sua" — evita
+    oráculo de enumeração). Se o caller revogar a própria sessão, cookies
+    são limpos pra alinhar UI com o estado do backend.
+    Requer autenticação + CSRF (DELETE não-safe)."""
+    ip = get_client_ip(request)
+    await check_rate_limit("sessions_revoke:ip", ip, *rl.SESSIONS_REVOKE_IP)
+
+    await revoke_session(session["user_id"], session_id)
+
+    current_token = getattr(request.state, "session_token", None)
+    if current_token and session_id_from_token(current_token) == session_id:
+        clear_session_cookies(response)
+
+    return MessageResponse(message="Sessão revogada")
 
 
 @router.post("/delete-account", response_model=MessageResponse)

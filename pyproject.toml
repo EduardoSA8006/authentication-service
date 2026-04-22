@@ -22,7 +22,11 @@ dependencies = [
     "psycopg[binary] (>=3.3.3,<4.0.0)",
     "argon2-cffi (>=25.1.0,<26.0.0)",
     "aiosmtplib (>=3.0.2,<4.0.0)",
-    "jinja2 (>=3.1.4,<4.0.0)"
+    "jinja2 (>=3.1.4,<4.0.0)",
+    # httpx é usado em runtime pelo http_client singleton (HIBP, Turnstile,
+    # Cloudflare CAPTCHA). Estava em dev dependencies por engano — imagem
+    # Docker `--only main` não tinha httpx e quebrava no startup do runtime.
+    "httpx (>=0.28.0,<1.0.0)"
 ]
 
 
@@ -37,7 +41,6 @@ dev = [
     "pytest (>=8.3.5,<9.0.0)",
     "pytest-asyncio (>=0.26.0,<1.0.0)",
     "pytest-cov (>=6.1.0,<7.0.0)",
-    "httpx (>=0.28.0,<1.0.0)",
     "dirty-equals (>=0.10.0,<1.0.0)",
     "pip-audit (>=2.10.0,<3.0.0)",
     "bandit (>=1.8.0,<2.0.0)"
@@ -80,3 +83,64 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "if TYPE_CHECKING:",
 ]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+# src = ["app"] não é setado pra que ruff indexe tests/ também via `ruff check .`.
+
+[tool.ruff.lint]
+# Baseline explícito (E4/E7/E9 + F do ruff 0.15 default) + hardening:
+#   S (bandit-style):   catches eval/exec/hardcoded secrets/weak crypto em PR
+#                       antes do security job rodar no CI.
+#   B (flake8-bugbear): detecta bugs comuns (mutable default args, unused
+#                       loop vars, except Exception sem logging).
+#   UP (pyupgrade):     força sintaxe moderna (dict|None em vez de
+#                       Optional[dict], etc). Alinha com target-version=py312.
+# I (isort) fica fora por ora — exigiria reformatar 30+ arquivos sem ganho
+# estrutural. Adicionar depois em PR dedicado.
+select = ["E4", "E7", "E9", "F", "S", "B", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations alembic têm linhas longas de DDL; não vale reformatar
+# auto-geradas.
+"app/migrations/*" = ["E501"]
+# Tests podem usar assert (S101), hardcoded test passwords (S105/S106/S107),
+# random pra dados de teste (S311), subprocess com shell (S603), Jinja sem
+# autoescape em template .txt (S701). Contexto de teste não tem superfície
+# de ataque equivalente a prod.
+"tests/**" = ["S101", "S105", "S106", "S107", "S311", "S603", "S701"]
+# Routers FastAPI: B008 é incompatível com a DI do FastAPI. `Depends()`
+# em default args é exatamente como o framework espera receber a dependência;
+# ignorar B008 no router é a forma padrão de conviver com esta regra.
+"app/features/auth/router.py" = ["B008"]
+
+[tool.mypy]
+python_version = "3.12"
+plugins = ["pydantic.mypy"]
+ignore_missing_imports = true
+# Baseline permissivo — checkagem de tipos está ligada no CI para prevenir
+# regressão, mas os módulos legados abaixo têm dívida de tipos preexistente
+# (redis.asyncio retorna Awaitable|sync; Starlette exception handlers têm
+# assinatura genérica). Remover overrides módulo a módulo conforme limpeza.
+
+[[tool.mypy.overrides]]
+# Plano de remoção iterativa. Cada módulo listado aqui tem dívida de tipos
+# preexistente que precisa ser limpa antes de voltar ao baseline estrito.
+# Ao resolver, tirar o módulo da lista e validar `poetry run mypy app/`.
+#
+# Status:
+# - app.core.database:     redis.asyncio retorna Awaitable|sync em alguns
+#                          métodos; mypy reclama de arg-type no pool setup.
+#                          Remover quando migrar p/ redis-py 6.x (fix upstream).
+# - app.core.security:     misc error em cjson/lua typing + argumentos
+#                          dinâmicos em _spawn/scripts. Remover após migrar
+#                          Lua scripts pra Python 3.12+ typed dict helpers.
+#
+# (Já removido: app.core.error_handlers — migrou pra Request genérico do
+#  Starlette, fechamos débito em 2026-04.)
+module = [
+    "app.core.database",
+    "app.core.security",
+]
+disable_error_code = ["misc", "arg-type"]

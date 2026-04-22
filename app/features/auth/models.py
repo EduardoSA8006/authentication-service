@@ -12,7 +12,10 @@ class User(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(120))
-    email: Mapped[str] = mapped_column(String(254), unique=True, index=True)
+    # unique=True já cria um índice único implícito em Postgres/SQLite.
+    # index=True adicional duplicaria o índice em dialetos não-Postgres e
+    # gera warning no autogen do alembic.
+    email: Mapped[str] = mapped_column(String(254), unique=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     date_of_birth: Mapped[date] = mapped_column(Date)
     is_verified: Mapped[bool] = mapped_column(default=False)

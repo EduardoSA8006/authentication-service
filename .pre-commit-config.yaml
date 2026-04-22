@@ -1,0 +1,10 @@
+# Pre-commit hooks — camada local que barra commit antes de push.
+# Instalação: `pipx install pre-commit && pre-commit install` (uma vez por clone).
+# Gitleaks também roda em CI (.github/workflows/ci.yml), mas lá só detecta
+# depois do push — o hook local impede que o secret saia da máquina.
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks

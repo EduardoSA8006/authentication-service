@@ -49,12 +49,65 @@ class TestCSRF:
         r = await client.post("/auth/logout")
         assert r.status_code == 403
 
-    async def test_referer_fallback_works(self, client):
+    async def test_referer_is_not_accepted_as_origin_fallback(self, client):
+        """Referer não é gate — só Origin. Defensivo contra edge-cases de
+        urlparse (http://evil#@legit, http:///\\\\legit) e cenários onde
+        atacante consegue suprimir Origin mas forjar Referer."""
         client.headers.pop("Origin", None)
         r = await client.post(
             "/auth/register",
             json={"name": "Ref Erer", "email": "ref@test.com", "password": "SenhaForte@2026", "date_of_birth": "1990-01-01"},
             headers={"Referer": "http://localhost:3000/signup"},
         )
-        # Referer parseado → localhost:3000 → está em ALLOWED_ORIGINS → passa
-        assert r.status_code in (202, 422)  # 202 register-queue ou 422 validação
+        assert r.status_code == 403
+        assert r.json()["error"]["code"] == "ORIGIN_MISSING"
+
+    async def test_csrf_failure_logs_warning(self, client, make_user, caplog):
+        """N-19: falha CSRF deve logar WARNING com method/path/ip pra alertas."""
+        import logging
+        caplog.set_level(logging.WARNING, logger="app.core.middleware")
+
+        await make_user(email="csrflog@test.com", password="SenhaForte@2026")
+        await client.post("/auth/login", json={
+            "email": "csrflog@test.com", "password": "SenhaForte@2026",
+        })
+        client.headers["X-CSRF-Token"] = "wrong"
+
+        r = await client.post("/auth/logout")
+        assert r.status_code == 403
+
+        assert any(
+            "CSRF gate failure: CSRF_FAILED" in rec.message
+            and "path=/auth/logout" in rec.message
+            for rec in caplog.records
+        )
+
+    async def test_origin_missing_logs_warning(self, client, caplog):
+        import logging
+        caplog.set_level(logging.WARNING, logger="app.core.middleware")
+
+        client.headers.pop("Origin", None)
+        r = await client.post(
+            "/auth/register",
+            json={
+                "name": "X", "email": "y@z.com",
+                "password": "Senha@123", "date_of_birth": "1990-01-01",
+            },
+        )
+        assert r.status_code == 403
+        assert any(
+            "ORIGIN_MISSING" in rec.message for rec in caplog.records
+        )
+
+    async def test_origin_rejected_even_with_matching_referer(self, client):
+        """Origin errado + Referer aliado: Origin vence, rejeita."""
+        r = await client.post(
+            "/auth/register",
+            json={"name": "X Y", "email": "mix@test.com", "password": "Senha@1234!", "date_of_birth": "1990-01-01"},
+            headers={
+                "Origin": "http://evil.com",
+                "Referer": "http://localhost:3000/signup",
+            },
+        )
+        assert r.status_code == 403
+        assert r.json()["error"]["code"] == "ORIGIN_REJECTED"
