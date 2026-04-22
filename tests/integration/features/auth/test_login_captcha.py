@@ -34,14 +34,23 @@ async def captcha_on():
         yield
 
 
+@pytest_asyncio.fixture
+async def captcha_off():
+    """Desabilita CAPTCHA explicitamente. Default do settings é True,
+    então testes que validam comportamento 'sem CAPTCHA' precisam deste
+    patch para não cair no branch de verify_captcha."""
+    with patch.object(settings, "CAPTCHA_ENABLED", False):
+        yield
+
+
 async def _saturate_layer_2(email: str) -> None:
     for i in range(_LOCKOUT_GLOBAL_THRESHOLD):
         await record_login_failure(email, f"10.0.{i // 256}.{i % 256}")
 
 
 class TestLayer2WithoutCaptcha:
-    async def test_hard_block_when_captcha_disabled(self, client, make_user):
-        """CAPTCHA_ENABLED=False (default em testes) → N-6 hard block intacto."""
+    async def test_hard_block_when_captcha_disabled(self, client, make_user, captcha_off):
+        """CAPTCHA_ENABLED=False → N-6 hard block intacto."""
         await make_user(email=_EMAIL, password=_PASSWORD)
         await _saturate_layer_2(_EMAIL)
 
@@ -51,7 +60,7 @@ class TestLayer2WithoutCaptcha:
         assert r.status_code == 429
         assert r.json()["error"]["code"] == "SUSPICIOUS_ACTIVITY"
 
-    async def test_captcha_token_ignored_when_disabled(self, client, make_user):
+    async def test_captcha_token_ignored_when_disabled(self, client, make_user, captcha_off):
         """Mesmo com header X-Captcha-Token, sem CAPTCHA_ENABLED não bypassa."""
         await make_user(email=_EMAIL, password=_PASSWORD)
         await _saturate_layer_2(_EMAIL)

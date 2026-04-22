@@ -82,11 +82,14 @@ class TestResetPassword:
         assert r2.status_code == 400
 
     async def test_weak_password_400(self, client, make_user):
+        # Passa o guard de schema (min_length=8) mas falha validate_password
+        # (sem uppercase/digit/special) no service → WEAK_PASSWORD (400).
+        # Valores <8 chars caem no schema e retornam 422 (ver test_oversized_password_422).
         user = await make_user(email=_EMAIL, password=_OLD_PASSWORD)
         token = await _create_reset_token(str(user.id))
 
         r = await client.post("/auth/reset-password", json={
-            "token": token, "new_password": "curta",
+            "token": token, "new_password": "senhafraca",
         })
         assert r.status_code == 400
         assert r.json()["error"]["code"] == "WEAK_PASSWORD"
